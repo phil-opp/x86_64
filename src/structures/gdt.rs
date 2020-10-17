@@ -5,6 +5,7 @@ use crate::PrivilegeLevel;
 use bit_field::BitField;
 use bitflags::bitflags;
 use core::{cmp, fmt, mem};
+use crate::structures::tss::InvalidIoMap;
 
 /// Specifies which element to load into a segment from
 /// descriptor tables (i.e., is a index to LDT or GDT table
@@ -307,7 +308,30 @@ impl Descriptor {
     #[inline]
     pub fn tss_segment(tss: &'static TaskStateSegment) -> Descriptor {
         // SAFETY: if iomap_size is zero, there are no requirements to uphold.
-        unsafe { Self::tss_segment_with_iomap(tss, 0) }
+        unsafe { Self::tss_segment_raw(tss, 0) }
+    }
+
+    /// Creates a TSS system descriptor for the given TSS, setting up the IO permissions bitmap.
+    pub fn tss_segment_with_iomap(
+        tss: &'static TaskStateSegment,
+        iomap: &'static [u8],
+    ) -> Result<Descriptor, InvalidIoMap> {
+        if iomap.len() > 8193 {
+            return Err(InvalidIoMap::TooLong { len: iomap.len() })
+        }
+
+        let distance = iomap.as_ptr() as usize - tss as *const _ as usize;
+        if distance > 0xdfff {
+            return Err(InvalidIoMap::TooFarFromTss { distance })
+        }
+
+        let last_byte = *iomap.last().unwrap_or(&0xff);
+        if last_byte != 0xff {
+            return Err(InvalidIoMap::InvalidTerminatingByte { byte: last_byte })
+        }
+
+        // SAFETY: all invariants checked above
+        Ok(unsafe { Self::tss_segment_raw(tss, iomap.len() as u16) })
     }
 
     /// Creates a TSS system descriptor for the given TSS, setting up the IO permissions bitmap.
@@ -317,7 +341,7 @@ impl Descriptor {
     /// There must be a valid IO map at `(tss as *const u8).offset(tss.iomap_base)`
     /// of length `iomap_size`, with the terminating `0xFF` byte. Additionally, `iomap_base` must
     /// not exceed `0xDFFF`.
-    pub unsafe fn tss_segment_with_iomap(
+    unsafe fn tss_segment_raw(
         tss: &'static TaskStateSegment,
         iomap_size: u16,
     ) -> Descriptor {
