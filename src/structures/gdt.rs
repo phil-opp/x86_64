@@ -4,7 +4,7 @@ use crate::structures::{tss::TaskStateSegment, DescriptorTablePointer};
 use crate::PrivilegeLevel;
 use bit_field::BitField;
 use bitflags::bitflags;
-use core::{fmt, cmp, mem};
+use core::{cmp, fmt, mem};
 
 /// Specifies which element to load into a segment from
 /// descriptor tables (i.e., is a index to LDT or GDT table
