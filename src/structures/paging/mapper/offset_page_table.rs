@@ -120,7 +120,7 @@ impl<'a> Mapper<Size1GiB> for OffsetPageTable<'a> {
     }
 
     #[inline]
-    fn unmap_range<D>(
+    unsafe fn unmap_range<D>(
         &mut self,
         pages: PageRange<Size1GiB>,
         deallocator: &mut D,
@@ -236,7 +236,7 @@ impl<'a> Mapper<Size2MiB> for OffsetPageTable<'a> {
     }
 
     #[inline]
-    fn unmap_range<D>(
+    unsafe fn unmap_range<D>(
         &mut self,
         pages: PageRange<Size2MiB>,
         deallocator: &mut D,
@@ -352,7 +352,7 @@ impl<'a> Mapper<Size4KiB> for OffsetPageTable<'a> {
     }
 
     #[inline]
-    fn unmap_range<D>(
+    unsafe fn unmap_range<D>(
         &mut self,
         pages: PageRange<Size4KiB>,
         deallocator: &mut D,
