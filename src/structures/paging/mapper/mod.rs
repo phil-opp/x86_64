@@ -6,6 +6,8 @@ pub use self::offset_page_table::OffsetPageTable;
 #[cfg(feature = "instructions")]
 pub use self::recursive_page_table::{InvalidPageTable, RecursivePageTable};
 
+use core::convert::Infallible;
+
 use crate::structures::paging::{
     frame::PhysFrameRange, frame_alloc::FrameAllocator, page::PageRange,
     page_table::PageTableFlags, FrameDeallocator, Page, PageSize, PhysFrame, Size1GiB, Size2MiB,
@@ -736,6 +738,12 @@ pub enum UnmapError {
     InvalidFrameAddress(PhysAddr),
 }
 
+impl From<Infallible> for UnmapError {
+    fn from(i: Infallible) -> Self {
+        match i {}
+    }
+}
+
 /// An error indicating that an `update_flags` call failed.
 #[derive(Debug)]
 pub enum FlagUpdateError {
@@ -744,6 +752,12 @@ pub enum FlagUpdateError {
     /// An upper level page table entry has the `HUGE_PAGE` flag set, which means that the
     /// given page is part of a huge page and can't be freed individually.
     ParentEntryHugePage,
+}
+
+impl From<Infallible> for FlagUpdateError {
+    fn from(i: Infallible) -> Self {
+        match i {}
+    }
 }
 
 /// An error indicating that an `translate` call failed.
