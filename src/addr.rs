@@ -198,6 +198,20 @@ impl VirtAddr {
     pub const fn p4_index(self) -> PageTableIndex {
         PageTableIndex::new_truncate((self.0 >> 12 >> 9 >> 9 >> 9) as u16)
     }
+
+    /// Returns the 9-bit level page table index.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if level is not between 1 and 4
+    #[inline]
+    pub const fn p_index(self, level: u8) -> PageTableIndex {
+        #[cfg(feature = "const_fn")]
+        assert!(1 <= level && level <= 4, "level has to be between 1 and 4");
+        #[cfg(not(feature = "const_fn"))]
+        [(); 1][!(1 <= level && level <= 4) as usize];
+        PageTableIndex::new_truncate((self.0 >> 12 >> ((level - 1) * 9)) as u16)
+    }
 }
 
 impl fmt::Debug for VirtAddr {

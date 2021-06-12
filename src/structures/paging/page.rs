@@ -131,6 +131,18 @@ impl<S: PageSize> Page<S> {
     }
 
     const_fn! {
+        /// Returns the level 3 page table index of this page.
+        ///
+        /// ## Panics
+        ///
+        /// Panics if level is not between 1 and 4
+        #[inline]
+        pub fn p_index(self, level: u8) -> PageTableIndex {
+            self.start_address().p_index(level)
+        }
+    }
+
+    const_fn! {
         /// Returns a range of pages, exclusive `end`.
         #[inline]
         pub fn range(start: Self, end: Self) -> PageRange<S> {

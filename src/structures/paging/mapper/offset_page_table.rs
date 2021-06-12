@@ -1,7 +1,8 @@
 #![cfg(target_pointer_width = "64")]
 
 use crate::structures::paging::{
-    frame::PhysFrame, mapper::*, page_table::PageTable, Page, PageTableFlags,
+    frame::PhysFrame, mapper::*, page::PageRangeInclusive, page_table::PageTable, FrameDeallocator,
+    Page, PageTableFlags,
 };
 
 /// A Mapper implementation that requires that the complete physically memory is mapped at some
@@ -40,6 +41,44 @@ impl<'a> OffsetPageTable<'a> {
     /// Returns a mutable reference to the wrapped level 4 `PageTable` instance.
     pub fn level_4_table(&mut self) -> &mut PageTable {
         self.inner.level_4_table()
+    }
+
+    /// Remove all empty P1-P3 tables
+    #[inline]
+    pub fn clean_up<D>(&mut self, frame_deallocator: &mut D)
+    where
+        D: FrameDeallocator<Size4KiB>,
+    {
+        unsafe {
+            // SAFETY: page tables are only used exactly once
+            self.inner.clean_up(frame_deallocator)
+        }
+    }
+
+    /// Remove all empty P1-P3 tables in a certain range
+    /// ```
+    /// # use core::ops::RangeInclusive;
+    /// # use x86_64::{VirtAddr, structures::paging::{
+    /// #    FrameDeallocator, Size4KiB, MappedPageTable, mapper::OffsetPageTable, page::{Page, PageRangeInclusive},
+    /// # }};
+    /// # unsafe fn test(page_table: &mut OffsetPageTable, frame_deallocator: &mut impl FrameDeallocator<Size4KiB>) {
+    /// // clean up all page tables in the lower half of the address space
+    /// let lower_half = Page::range_inclusive(
+    ///     Page::containing_address(VirtAddr::new(0)),
+    ///     Page::containing_address(VirtAddr::new(0x0000_7fff_ffff_ffff)),
+    /// );
+    /// page_table.clean_up_addr_range(lower_half, frame_deallocator);
+    /// # }
+    /// ```
+    #[inline]
+    pub fn clean_up_addr_range<D>(&mut self, range: PageRangeInclusive, frame_deallocator: &mut D)
+    where
+        D: FrameDeallocator<Size4KiB>,
+    {
+        unsafe {
+            // SAFETY: page tables are only used exactly once
+            self.inner.clean_up_addr_range(range, frame_deallocator)
+        }
     }
 }
 
