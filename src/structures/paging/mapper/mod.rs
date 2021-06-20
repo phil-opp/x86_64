@@ -222,24 +222,18 @@ pub trait Mapper<S: PageSize> {
         Self: Sized,
         A: FrameAllocator<Size4KiB> + ?Sized,
     {
-        assert_eq!(pages.count(), frames.count());
+        let parent_table_flags = flags
+            & (PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::USER_ACCESSIBLE);
 
-        pages
-            .zip(frames)
-            .try_for_each(|(page, frame)| {
-                self.map_to(page, frame, flags, frame_allocator)
-                    .map(|_| ())
-                    .map_err(|e| {
-                        (
-                            e,
-                            MapperFlushRange::new(PageRange {
-                                start: pages.start,
-                                end: page,
-                            }),
-                        )
-                    })
-            })
-            .map(|_| MapperFlushRange::new(pages))
+        self.map_to_range_with_table_flags(
+            pages,
+            frames,
+            flags,
+            parent_table_flags,
+            frame_allocator,
+        )
     }
 
     /// Creates a new mapping in the page table.
