@@ -2,7 +2,7 @@
 
 pub use crate::registers::segmentation::{CS, DS, ES, FS, GS, SS, Segment, Segment64};
 use crate::{
-    VirtAddr57,
+    addr::{RawVirtAddr, VirtAddrGeneric, VirtAddrWidth},
     registers::model_specific::{FsBase, GsBase, Msr},
     structures::gdt::SegmentSelector,
 };
@@ -41,16 +41,16 @@ macro_rules! segment64_impl {
         impl Segment64 for $type {
             const BASE: Msr = <$base>::MSR;
             #[inline]
-            fn read_base() -> VirtAddr57 {
+            fn read_base() -> RawVirtAddr {
                 unsafe {
                     let val: u64;
                     asm!(concat!("rd", $name, "base {}"), out(reg) val, options(nomem, nostack, preserves_flags));
-                    VirtAddr57::new_unsafe(val)
+                    RawVirtAddr::new(val)
                 }
             }
 
             #[inline]
-            unsafe fn write_base(base: VirtAddr57) {
+            unsafe fn write_base<W: VirtAddrWidth>(base: VirtAddrGeneric<W>) {
                 unsafe{
                     asm!(concat!("wr", $name, "base {}"), in(reg) base.as_u64(), options(nostack, preserves_flags));
                 }
