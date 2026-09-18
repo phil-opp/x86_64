@@ -252,7 +252,7 @@ mod x86_64 {
     use super::*;
     use crate::PhysAddr;
     use crate::PrivilegeLevel;
-    use crate::addr::{VirtAddr57, Width57};
+    use crate::addr::{RawVirtAddr, VirtAddr57, VirtAddrGeneric, VirtAddrWidth, Width57};
     use crate::registers::rflags::RFlags;
     use crate::structures::gdt::SegmentSelector;
     use crate::structures::paging::Page;
@@ -384,11 +384,15 @@ mod x86_64 {
     impl FsBase {
         /// Read the current FsBase register.
         ///
+        /// The address is canonical for the active paging mode. Use
+        /// [`RawVirtAddr::try_into_48`] or [`RawVirtAddr::try_into_57`] to convert it into a
+        /// checked address type.
+        ///
         /// If [`CR4.FSGSBASE`][Cr4Flags::FSGSBASE] is set, the more efficient
         /// [`FS::read_base`] can be used instead.
         #[inline]
-        pub fn read() -> VirtAddr57 {
-            VirtAddr57::new(unsafe { Self::MSR.read() })
+        pub fn read() -> RawVirtAddr {
+            RawVirtAddr::new(unsafe { Self::MSR.read() })
         }
 
         /// Write a given virtual address to the FS.Base register.
@@ -401,7 +405,7 @@ mod x86_64 {
         /// The caller must ensure that this write operation has no unsafe side
         /// effects, as the segment base address might be in use.
         #[inline]
-        pub unsafe fn write(address: VirtAddr57) {
+        pub unsafe fn write<W: VirtAddrWidth>(address: VirtAddrGeneric<W>) {
             let mut msr = Self::MSR;
             unsafe { msr.write(address.as_u64()) };
         }
@@ -410,11 +414,15 @@ mod x86_64 {
     impl GsBase {
         /// Read the current GsBase register.
         ///
+        /// The address is canonical for the active paging mode. Use
+        /// [`RawVirtAddr::try_into_48`] or [`RawVirtAddr::try_into_57`] to convert it into a
+        /// checked address type.
+        ///
         /// If [`CR4.FSGSBASE`][Cr4Flags::FSGSBASE] is set, the more efficient
         /// [`GS::read_base`] can be used instead.
         #[inline]
-        pub fn read() -> VirtAddr57 {
-            VirtAddr57::new(unsafe { Self::MSR.read() })
+        pub fn read() -> RawVirtAddr {
+            RawVirtAddr::new(unsafe { Self::MSR.read() })
         }
 
         /// Write a given virtual address to the GS.Base register.
@@ -427,7 +435,7 @@ mod x86_64 {
         /// The caller must ensure that this write operation has no unsafe side
         /// effects, as the segment base address might be in use.
         #[inline]
-        pub unsafe fn write(address: VirtAddr57) {
+        pub unsafe fn write<W: VirtAddrWidth>(address: VirtAddrGeneric<W>) {
             let mut msr = Self::MSR;
             unsafe { msr.write(address.as_u64()) };
         }
@@ -435,9 +443,13 @@ mod x86_64 {
 
     impl KernelGsBase {
         /// Read the current KernelGsBase register.
+        ///
+        /// The address is canonical for the active paging mode. Use
+        /// [`RawVirtAddr::try_into_48`] or [`RawVirtAddr::try_into_57`] to convert it into a
+        /// checked address type.
         #[inline]
-        pub fn read() -> VirtAddr57 {
-            VirtAddr57::new(unsafe { Self::MSR.read() })
+        pub fn read() -> RawVirtAddr {
+            RawVirtAddr::new(unsafe { Self::MSR.read() })
         }
 
         /// Write a given virtual address to the KernelGsBase register.
@@ -446,7 +458,7 @@ mod x86_64 {
         ///
         /// The caller must ensure that a future call to [`GS::swap`] has no unsafe side effects.
         #[inline]
-        pub unsafe fn write(address: VirtAddr57) {
+        pub unsafe fn write<W: VirtAddrWidth>(address: VirtAddrGeneric<W>) {
             let mut msr = Self::MSR;
             unsafe { msr.write(address.as_u64()) };
         }
@@ -596,15 +608,19 @@ mod x86_64 {
     impl LStar {
         /// Read the current LStar register.
         /// This holds the target RIP of a syscall.
+        ///
+        /// The address is canonical for the active paging mode. Use
+        /// [`RawVirtAddr::try_into_48`] or [`RawVirtAddr::try_into_57`] to convert it into a
+        /// checked address type.
         #[inline]
-        pub fn read() -> VirtAddr57 {
-            VirtAddr57::new(unsafe { Self::MSR.read() })
+        pub fn read() -> RawVirtAddr {
+            RawVirtAddr::new(unsafe { Self::MSR.read() })
         }
 
         /// Write a given virtual address to the LStar register.
         /// This holds the target RIP of a syscall.
         #[inline]
-        pub fn write(address: VirtAddr57) {
+        pub fn write<W: VirtAddrWidth>(address: VirtAddrGeneric<W>) {
             let mut msr = Self::MSR;
             unsafe { msr.write(address.as_u64()) };
         }

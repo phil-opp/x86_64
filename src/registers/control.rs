@@ -229,10 +229,7 @@ impl PriorityClass {
 #[cfg(all(feature = "instructions", target_arch = "x86_64"))]
 mod x86_64 {
     use super::*;
-    use crate::{
-        PhysAddr, VirtAddr57, addr::VirtAddrNotValid, instructions::tlb::Pcid,
-        structures::paging::PhysFrame,
-    };
+    use crate::{PhysAddr, RawVirtAddr, instructions::tlb::Pcid, structures::paging::PhysFrame};
     use core::arch::asm;
 
     impl Cr0 {
@@ -312,13 +309,12 @@ mod x86_64 {
     impl Cr2 {
         /// Read the current page fault linear address from the CR2 register.
         ///
-        /// # Errors
-        ///
-        /// This method returns a [`VirtAddrNotValid`] error if the CR2 register contains a
-        /// non-canonical address. Call [`Cr2::read_raw`] to handle such cases.
+        /// The value is returned without a canonicality check. Use
+        /// [`RawVirtAddr::try_into_48`] or [`RawVirtAddr::try_into_57`] to convert it into a
+        /// checked address type, depending on the paging mode of the kernel.
         #[inline]
-        pub fn read() -> Result<VirtAddr57, VirtAddrNotValid> {
-            VirtAddr57::try_new(Self::read_raw())
+        pub fn read() -> RawVirtAddr {
+            RawVirtAddr::new(Self::read_raw())
         }
 
         /// Read the current page fault linear address from the CR2 register as a raw `u64`.

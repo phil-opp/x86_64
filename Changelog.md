@@ -16,8 +16,10 @@
 - [make memory encryption bit an upper limit for physical address bits](https://github.com/rust-osdev/x86_64/pull/603)
 - add support for 57-bit virtual addresses (5-level paging)
   - `VirtAddr` is now an alias for the new `VirtAddr48` type, which is `VirtAddrGeneric<Width48>`. The new `VirtAddr57` type (`VirtAddrGeneric<Width57>`) represents 57-bit canonical addresses. `VirtAddr48` can be converted into `VirtAddr57` using `From`, the reverse conversion is available through `TryFrom`.
-  - Structures and registers that hold linear addresses interpreted by the CPU now use `VirtAddr57`: `InterruptStackFrameValue`, `TaskStateSegment`, `DescriptorTablePointer`, `Entry::set_handler_addr`/`handler_addr`, `HandlerFuncType::to_virt_addr`, `Cr2::read`, `FsBase`, `GsBase`, `KernelGsBase`, `LStar`, `UCet`/`SCet`, `Segment64::read_base`/`write_base`, `read_rip`, and `InvPcidCommand::Address`.
-    - To migrate, convert 48-bit addresses with `.into()` when writing and with `VirtAddr::try_from(..)` when reading.
+  - Addresses that are written by the CPU are now represented by the new unchecked `RawVirtAddr` type, which converts to either checked type via `try_into_48`/`try_into_57` (or `TryFrom`) and from either checked type via `From`: `InterruptStackFrameValue::instruction_pointer`/`stack_pointer`, `DescriptorTablePointer::base`, `Entry::handler_addr`, `HandlerFuncType::to_virt_addr`, `Cr2::read` (which no longer returns a `Result`), `FsBase::read`, `GsBase::read`, `KernelGsBase::read`, `LStar::read`, `Segment64::read_base`, and `read_rip`.
+    - To migrate, call `.try_into_48()` (or `.try_into_57()`) on the returned value.
+  - Methods that write an address to the CPU accept both widths: `FsBase::write`, `GsBase::write`, `KernelGsBase::write`, `LStar::write`, and `Segment64::write_base` are generic over the address width, and `InterruptStackFrame::new`, `InterruptStackFrameValue::new`, and `Entry::set_handler_addr` accept `impl Into<RawVirtAddr>`.
+  - Structures that hold addresses written by the kernel and only read by the CPU use `VirtAddr57`: `TaskStateSegment`, `UCet`/`SCet`, and `InvPcidCommand::Address`. To migrate, convert 48-bit addresses with `.into()`.
   - `Page`, `PageRange`, `PageRangeInclusive`, `MapperFlush`, `UnmappedFrame`, and the `Mapper`, `MapperAllSizes`, `Translate`, and `CleanUp` traits have a new virtual address width parameter that defaults to `Width48`. `Page<S, Width57>` represents a page in a 57-bit address space.
   - `tlb::flush` accepts virtual addresses of both widths.
 

@@ -99,6 +99,28 @@ pub type VirtAddr57 = VirtAddrGeneric<Width57>;
 /// (5-level paging).
 pub type VirtAddr = VirtAddr48;
 
+/// A virtual memory address as read from or written to the CPU, without any canonicality
+/// guarantee.
+///
+/// This type is used at the boundary between this crate and the hardware, for values that
+/// the CPU writes and that this crate cannot verify: the instruction and stack pointer in an
+/// [`InterruptStackFrame`](crate::structures::idt::InterruptStackFrame), the contents of
+/// `CR2`, segment base registers, and similar. Whether such a value is a valid 48-bit or
+/// 57-bit address depends on the paging mode the CPU is running in, which only the kernel
+/// knows. Convert it to a checked address type with [`try_into_48`](Self::try_into_48),
+/// [`try_into_57`](Self::try_into_57), or [`TryFrom`]; both checked types convert into a
+/// `RawVirtAddr` using [`From`].
+///
+/// Arithmetic on this type is plain `u64` arithmetic that panics on overflow. It does not
+/// jump the non-canonical “gap” and does not keep the address canonical.
+///
+/// # Representation
+///
+/// This struct has the same representation as a [`u64`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct RawVirtAddr(u64);
+
 /// A 64-bit physical memory address.
 ///
 /// This is a wrapper type around an `u64`, so it is always 8 bytes, even when compiled
@@ -620,6 +642,217 @@ impl TryFrom<VirtAddr57> for VirtAddr48 {
     }
 }
 
+impl RawVirtAddr {
+    /// Creates a new raw virtual address from the given value.
+    ///
+    /// No checks are performed.
+    #[inline]
+    pub const fn new(addr: u64) -> Self {
+        RawVirtAddr(addr)
+    }
+
+    /// Creates a raw virtual address that points to `0`.
+    #[inline]
+    pub const fn zero() -> Self {
+        RawVirtAddr(0)
+    }
+
+    /// Converts the address to an `u64`.
+    #[inline]
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    /// Creates a raw virtual address from the given pointer.
+    #[cfg(target_pointer_width = "64")]
+    #[inline]
+    pub fn from_ptr<T: ?Sized>(ptr: *const T) -> Self {
+        Self::new(ptr as *const () as u64)
+    }
+
+    /// Converts the address to a raw pointer.
+    #[cfg(target_pointer_width = "64")]
+    #[inline]
+    pub const fn as_ptr<T>(self) -> *const T {
+        self.as_u64() as *const T
+    }
+
+    /// Converts the address to a mutable raw pointer.
+    #[cfg(target_pointer_width = "64")]
+    #[inline]
+    pub const fn as_mut_ptr<T>(self) -> *mut T {
+        self.as_ptr::<T>() as *mut T
+    }
+
+    /// Convenience method for checking if a virtual address is null.
+    #[inline]
+    pub const fn is_null(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Returns whether the address is canonical for the given [width](VirtAddrWidth).
+    #[inline]
+    pub const fn is_canonical<W: VirtAddrWidth>(self) -> bool {
+        VirtAddrGeneric::<W>::try_new(self.0).is_ok()
+    }
+
+    /// Tries to convert the address into a canonical address of the given
+    /// [width](VirtAddrWidth).
+    ///
+    /// Fails if the address is not canonical for that width.
+    #[inline]
+    pub const fn try_into_width<W: VirtAddrWidth>(
+        self,
+    ) -> Result<VirtAddrGeneric<W>, VirtAddrNotValid> {
+        VirtAddrGeneric::try_new(self.0)
+    }
+
+    /// Tries to convert the address into a canonical 48-bit address.
+    ///
+    /// Fails if bits 48 to 64 are not a correct sign extension of bit 47. This is the
+    /// conversion to use in kernels that run with 4-level paging.
+    #[inline]
+    pub const fn try_into_48(self) -> Result<VirtAddr48, VirtAddrNotValid> {
+        self.try_into_width()
+    }
+
+    /// Tries to convert the address into a canonical 57-bit address.
+    ///
+    /// Fails if bits 57 to 64 are not a correct sign extension of bit 56. This is the
+    /// conversion to use in kernels that run with 5-level paging.
+    #[inline]
+    pub const fn try_into_57(self) -> Result<VirtAddr57, VirtAddrNotValid> {
+        self.try_into_width()
+    }
+}
+
+impl<W: VirtAddrWidth> From<VirtAddrGeneric<W>> for RawVirtAddr {
+    /// Discards the canonicality guarantee of a checked virtual address.
+    #[inline]
+    fn from(addr: VirtAddrGeneric<W>) -> Self {
+        RawVirtAddr(addr.as_u64())
+    }
+}
+
+impl<W: VirtAddrWidth> TryFrom<RawVirtAddr> for VirtAddrGeneric<W> {
+    type Error = VirtAddrNotValid;
+
+    /// Checks that the raw address is canonical for the width `W`.
+    #[inline]
+    fn try_from(addr: RawVirtAddr) -> Result<Self, Self::Error> {
+        addr.try_into_width()
+    }
+}
+
+impl fmt::Debug for RawVirtAddr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("RawVirtAddr")
+            .field(&format_args!("{:#x}", self.0))
+            .finish()
+    }
+}
+
+impl fmt::Binary for RawVirtAddr {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Binary::fmt(&self.0, f)
+    }
+}
+
+impl fmt::LowerHex for RawVirtAddr {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Octal for RawVirtAddr {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Octal::fmt(&self.0, f)
+    }
+}
+
+impl fmt::UpperHex for RawVirtAddr {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::UpperHex::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Pointer for RawVirtAddr {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Pointer::fmt(&(self.0 as *const ()), f)
+    }
+}
+
+impl Add<u64> for RawVirtAddr {
+    type Output = Self;
+
+    /// Adds an offset to the address using plain integer arithmetic.
+    ///
+    /// # Panics
+    ///
+    /// This function panics on overflow.
+    #[inline]
+    fn add(self, rhs: u64) -> Self::Output {
+        RawVirtAddr(
+            self.0
+                .checked_add(rhs)
+                .expect("attempt to add with overflow"),
+        )
+    }
+}
+
+impl AddAssign<u64> for RawVirtAddr {
+    #[inline]
+    fn add_assign(&mut self, rhs: u64) {
+        *self = *self + rhs;
+    }
+}
+
+impl Sub<u64> for RawVirtAddr {
+    type Output = Self;
+
+    /// Subtracts an offset from the address using plain integer arithmetic.
+    ///
+    /// # Panics
+    ///
+    /// This function panics on overflow.
+    #[inline]
+    fn sub(self, rhs: u64) -> Self::Output {
+        RawVirtAddr(
+            self.0
+                .checked_sub(rhs)
+                .expect("attempt to subtract with overflow"),
+        )
+    }
+}
+
+impl SubAssign<u64> for RawVirtAddr {
+    #[inline]
+    fn sub_assign(&mut self, rhs: u64) {
+        *self = *self - rhs;
+    }
+}
+
+impl Sub<RawVirtAddr> for RawVirtAddr {
+    type Output = u64;
+
+    /// Returns the difference between two addresses.
+    ///
+    /// # Panics
+    ///
+    /// This function panics on overflow.
+    #[inline]
+    fn sub(self, rhs: RawVirtAddr) -> Self::Output {
+        self.0
+            .checked_sub(rhs.0)
+            .expect("attempt to subtract with overflow")
+    }
+}
+
 #[cfg(feature = "step_trait")]
 impl<W: VirtAddrWidth> Step for VirtAddrGeneric<W> {
     #[inline]
@@ -1010,6 +1243,55 @@ mod tests {
         assert!(VirtAddr48::try_from(only57).is_err());
         let only57 = VirtAddr57::new(0xff00_0000_0000_0000);
         assert!(VirtAddr48::try_from(only57).is_err());
+    }
+
+    #[test]
+    fn raw_virtaddr_conversions() {
+        let raw = RawVirtAddr::new(0xffff_8000_0000_1234);
+        assert_eq!(raw.try_into_48().unwrap(), VirtAddr48::new(raw.as_u64()));
+        assert_eq!(raw.try_into_57().unwrap(), VirtAddr57::new(raw.as_u64()));
+        assert!(raw.is_canonical::<Width48>());
+        assert!(raw.is_canonical::<Width57>());
+
+        let only57 = RawVirtAddr::new(0x0000_8000_0000_0000);
+        assert!(only57.try_into_48().is_err());
+        assert!(VirtAddr48::try_from(only57).is_err());
+        assert_eq!(only57.try_into_57().unwrap().as_u64(), only57.as_u64());
+        assert!(!only57.is_canonical::<Width48>());
+        assert!(only57.is_canonical::<Width57>());
+
+        let invalid = RawVirtAddr::new(0x0100_0000_0000_0000);
+        assert!(invalid.try_into_48().is_err());
+        assert!(invalid.try_into_57().is_err());
+
+        let from48: RawVirtAddr = VirtAddr48::new(0x1000).into();
+        let from57: RawVirtAddr = VirtAddr57::new(0x1000).into();
+        assert_eq!(from48, from57);
+        assert_eq!(from48.as_u64(), 0x1000);
+
+        const RAW: RawVirtAddr = RawVirtAddr::new(0x42);
+        const CHECKED: Result<VirtAddr48, VirtAddrNotValid> = RAW.try_into_48();
+        assert!(CHECKED.is_ok());
+    }
+
+    #[test]
+    fn raw_virtaddr_arithmetic() {
+        // Raw arithmetic doesn't jump or check the gap.
+        assert_eq!(
+            RawVirtAddr::new(0x7fff_ffff_ffff) + 1,
+            RawVirtAddr::new(0x8000_0000_0000)
+        );
+        assert_eq!(RawVirtAddr::new(0x2000) - RawVirtAddr::new(0x1000), 0x1000);
+        let mut addr = RawVirtAddr::new(0x1000);
+        addr += 2;
+        addr -= 1;
+        assert_eq!(addr.as_u64(), 0x1001);
+    }
+
+    #[test]
+    #[should_panic]
+    fn raw_virtaddr_add_overflow() {
+        let _ = RawVirtAddr::new(u64::MAX) + 1;
     }
 
     #[test]
