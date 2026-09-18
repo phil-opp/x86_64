@@ -8,25 +8,38 @@ pub use self::mapped_page_table::{OffsetPageTable, PhysOffset};
 #[cfg(all(feature = "instructions", target_arch = "x86_64"))]
 pub use self::recursive_page_table::{InvalidPageTable, RecursivePageTable};
 
+use crate::PhysAddr;
+use crate::addr::{VirtAddrGeneric, VirtAddrWidth, Width48};
 use crate::structures::paging::{
     Page, PageSize, PhysFrame, Size1GiB, Size2MiB, Size4KiB,
     frame_alloc::{FrameAllocator, FrameDeallocator},
     page::PageRangeInclusive,
     page_table::{PageTableEntry, PageTableFlags},
 };
-use crate::{PhysAddr, VirtAddr};
 
 mod mapped_page_table;
 #[cfg(all(feature = "instructions", target_arch = "x86_64"))]
 mod recursive_page_table;
 
 /// An empty convenience trait that requires the `Mapper` trait for all page sizes.
-pub trait MapperAllSizes: Mapper<Size4KiB> + Mapper<Size2MiB> + Mapper<Size1GiB> {}
+///
+/// The `W` parameter specifies the [width](VirtAddrWidth) of the virtual addresses that the
+/// mapper works with. It defaults to 48-bit addresses (4-level paging).
+pub trait MapperAllSizes<W: VirtAddrWidth = Width48>:
+    Mapper<Size4KiB, W> + Mapper<Size2MiB, W> + Mapper<Size1GiB, W>
+{
+}
 
-impl<T> MapperAllSizes for T where T: Mapper<Size4KiB> + Mapper<Size2MiB> + Mapper<Size1GiB> {}
+impl<T, W: VirtAddrWidth> MapperAllSizes<W> for T where
+    T: Mapper<Size4KiB, W> + Mapper<Size2MiB, W> + Mapper<Size1GiB, W>
+{
+}
 
 /// Provides methods for translating virtual addresses.
-pub trait Translate {
+///
+/// The `W` parameter specifies the [width](VirtAddrWidth) of the virtual addresses that can
+/// be translated. It defaults to 48-bit addresses (4-level paging).
+pub trait Translate<W: VirtAddrWidth = Width48> {
     /// Return the frame that the given virtual address is mapped to and the offset within that
     /// frame.
     ///
@@ -34,7 +47,7 @@ pub trait Translate {
     /// frame is returned. Otherwise an error value is returned.
     ///
     /// This function works with huge pages of all sizes.
-    fn translate(&self, addr: VirtAddr) -> TranslateResult;
+    fn translate(&self, addr: VirtAddrGeneric<W>) -> TranslateResult;
 
     /// Translates the given virtual address to the physical address that it maps to.
     ///
@@ -43,7 +56,7 @@ pub trait Translate {
     /// This is a convenience method. For more information about a mapping see the
     /// [`translate`](Translate::translate) method.
     #[inline]
-    fn translate_addr(&self, addr: VirtAddr) -> Option<PhysAddr> {
+    fn translate_addr(&self, addr: VirtAddrGeneric<W>) -> Option<PhysAddr> {
         match self.translate(addr) {
             TranslateResult::NotMapped | TranslateResult::InvalidFrameAddress(_) => None,
             TranslateResult::Mapped { frame, offset, .. } => Some(frame.start_address() + offset),
@@ -108,7 +121,11 @@ impl MappedFrame {
 }
 
 /// A trait for common page table operations on pages of size `S`.
-pub trait Mapper<S: PageSize> {
+///
+/// The `W` parameter specifies the [width](VirtAddrWidth) of the virtual addresses of the
+/// pages, i.e. whether the mapper manages a 48-bit address space (4-level paging, the
+/// default) or a 57-bit address space (5-level paging).
+pub trait Mapper<S: PageSize, W: VirtAddrWidth = Width48> {
     /// Creates a new mapping in the page table.
     ///
     /// This function might need additional physical frames to create new page tables. These
@@ -179,11 +196,11 @@ pub trait Mapper<S: PageSize> {
     #[inline]
     unsafe fn map_to<A>(
         &mut self,
-        page: Page<S>,
+        page: Page<S, W>,
         frame: PhysFrame<S>,
         flags: PageTableFlags,
         frame_allocator: &mut A,
-    ) -> Result<MapperFlush<S>, MapToError<S>>
+    ) -> Result<MapperFlush<S, W>, MapToError<S>>
     where
         Self: Sized,
         A: FrameAllocator<Size4KiB> + ?Sized,
@@ -270,12 +287,12 @@ pub trait Mapper<S: PageSize> {
     /// ```
     unsafe fn map_to_with_table_flags<A>(
         &mut self,
-        page: Page<S>,
+        page: Page<S, W>,
         frame: PhysFrame<S>,
         flags: PageTableFlags,
         parent_table_flags: PageTableFlags,
         frame_allocator: &mut A,
-    ) -> Result<MapperFlush<S>, MapToError<S>>
+    ) -> Result<MapperFlush<S, W>, MapToError<S>>
     where
         Self: Sized,
         A: FrameAllocator<Size4KiB> + ?Sized;
@@ -283,10 +300,11 @@ pub trait Mapper<S: PageSize> {
     /// Removes a mapping from the page table and returns the frame that used to be mapped.
     ///
     /// Note that no page tables or pages are deallocated.
+    #[allow(clippy::type_complexity)]
     fn unmap(
         &mut self,
-        page: Page<S>,
-    ) -> Result<(PhysFrame<S>, PageTableFlags, MapperFlush<S>), UnmapError>;
+        page: Page<S, W>,
+    ) -> Result<(PhysFrame<S>, PageTableFlags, MapperFlush<S, W>), UnmapError>;
 
     /// Clears a mapping from the page table and returns the frame that used to be mapped.
     ///
@@ -294,7 +312,7 @@ pub trait Mapper<S: PageSize> {
     /// clear the table entry for any valid page.
     ///
     /// Note that no page tables or pages are deallocated.
-    fn clear(&mut self, page: Page<S>) -> Result<UnmappedFrame<S>, UnmapError>;
+    fn clear(&mut self, page: Page<S, W>) -> Result<UnmappedFrame<S, W>, UnmapError>;
 
     /// Updates the flags of an existing mapping.
     ///
@@ -309,9 +327,9 @@ pub trait Mapper<S: PageSize> {
     /// spaces.
     unsafe fn update_flags(
         &mut self,
-        page: Page<S>,
+        page: Page<S, W>,
         flags: PageTableFlags,
-    ) -> Result<MapperFlush<S>, FlagUpdateError>;
+    ) -> Result<MapperFlush<S, W>, FlagUpdateError>;
 
     /// Set the flags of an existing page level 4 table entry
     ///
@@ -324,7 +342,7 @@ pub trait Mapper<S: PageSize> {
     /// spaces.
     unsafe fn set_flags_p4_entry(
         &mut self,
-        page: Page<S>,
+        page: Page<S, W>,
         flags: PageTableFlags,
     ) -> Result<MapperFlushAll, FlagUpdateError>;
 
@@ -339,7 +357,7 @@ pub trait Mapper<S: PageSize> {
     /// spaces.
     unsafe fn set_flags_p3_entry(
         &mut self,
-        page: Page<S>,
+        page: Page<S, W>,
         flags: PageTableFlags,
     ) -> Result<MapperFlushAll, FlagUpdateError>;
 
@@ -354,7 +372,7 @@ pub trait Mapper<S: PageSize> {
     /// spaces.
     unsafe fn set_flags_p2_entry(
         &mut self,
-        page: Page<S>,
+        page: Page<S, W>,
         flags: PageTableFlags,
     ) -> Result<MapperFlushAll, FlagUpdateError>;
 
@@ -362,7 +380,7 @@ pub trait Mapper<S: PageSize> {
     ///
     /// This function assumes that the page is mapped to a frame of size `S` and returns an
     /// error otherwise.
-    fn translate_page(&self, page: Page<S>) -> Result<PhysFrame<S>, TranslateError>;
+    fn translate_page(&self, page: Page<S, W>) -> Result<PhysFrame<S>, TranslateError>;
 
     /// Maps the given frame to the virtual page with the same address.
     ///
@@ -376,14 +394,14 @@ pub trait Mapper<S: PageSize> {
         frame: PhysFrame<S>,
         flags: PageTableFlags,
         frame_allocator: &mut A,
-    ) -> Result<MapperFlush<S>, MapToError<S>>
+    ) -> Result<MapperFlush<S, W>, MapToError<S>>
     where
         Self: Sized,
         A: FrameAllocator<Size4KiB> + ?Sized,
         S: PageSize,
-        Self: Mapper<S>,
+        Self: Mapper<S, W>,
     {
-        let page = Page::containing_address(VirtAddr::new(frame.start_address().as_u64()));
+        let page = Page::containing_address(VirtAddrGeneric::new(frame.start_address().as_u64()));
         unsafe { self.map_to(page, frame, flags, frame_allocator) }
     }
 }
@@ -392,7 +410,7 @@ pub trait Mapper<S: PageSize> {
 /// the unmapped frame or the entry data if the frame is not marked as present.
 #[derive(Debug)]
 #[must_use = "Page table changes must be flushed or ignored if the page is present."]
-pub enum UnmappedFrame<S: PageSize> {
+pub enum UnmappedFrame<S: PageSize, W: VirtAddrWidth = Width48> {
     /// The frame was present before the [`Mapper::clear`] call
     Present {
         /// The physical frame that was unmapped
@@ -400,7 +418,7 @@ pub enum UnmappedFrame<S: PageSize> {
         /// The flags of the frame that was unmapped
         flags: PageTableFlags,
         /// The changed page, to flush the TLB
-        flush: MapperFlush<S>,
+        flush: MapperFlush<S, W>,
     },
     /// The frame was not present before the [`Mapper::clear`] call
     NotPresent {
@@ -420,15 +438,15 @@ pub enum UnmappedFrame<S: PageSize> {
     not(all(feature = "instructions", target_arch = "x86_64")),
     allow(dead_code)
 )] // FIXME
-pub struct MapperFlush<S: PageSize>(Page<S>);
+pub struct MapperFlush<S: PageSize, W: VirtAddrWidth = Width48>(Page<S, W>);
 
-impl<S: PageSize> MapperFlush<S> {
+impl<S: PageSize, W: VirtAddrWidth> MapperFlush<S, W> {
     /// Create a new flush promise
     ///
     /// Note that this method is intended for implementing the [`Mapper`] trait and no other uses
     /// are expected.
     #[inline]
-    pub fn new(page: Page<S>) -> Self {
+    pub fn new(page: Page<S, W>) -> Self {
         MapperFlush(page)
     }
 
@@ -445,7 +463,7 @@ impl<S: PageSize> MapperFlush<S> {
 
     /// Returns the page to be flushed.
     #[inline]
-    pub fn page(&self) -> Page<S> {
+    pub fn page(&self) -> Page<S, W> {
         self.0
     }
 }
@@ -531,7 +549,10 @@ pub enum TranslateError {
 static _ASSERT_OBJECT_SAFE: Option<&(dyn Translate + Sync)> = None;
 
 /// Provides methods for cleaning up unused entries.
-pub trait CleanUp {
+///
+/// The `W` parameter specifies the [width](VirtAddrWidth) of the virtual addresses that the
+/// page table manages. It defaults to 48-bit addresses (4-level paging).
+pub trait CleanUp<W: VirtAddrWidth = Width48> {
     /// Remove all empty P1-P3 tables
     ///
     /// ## Safety
@@ -566,7 +587,7 @@ pub trait CleanUp {
     /// (e.g. no reference counted page tables or reusing the same page tables for different virtual addresses ranges in the same page table).
     unsafe fn clean_up_addr_range<D>(
         &mut self,
-        range: PageRangeInclusive,
+        range: PageRangeInclusive<Size4KiB, W>,
         frame_deallocator: &mut D,
     ) where
         D: FrameDeallocator<Size4KiB>;

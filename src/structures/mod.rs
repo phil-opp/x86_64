@@ -1,6 +1,6 @@
 //! Representations of various x86 specific structures and descriptor tables.
 
-use crate::VirtAddr;
+use crate::VirtAddr57;
 
 pub mod gdt;
 
@@ -20,7 +20,7 @@ pub struct DescriptorTablePointer {
     /// Size of the DT in bytes - 1.
     pub limit: u16,
     /// Pointer to the memory region containing the DT.
-    pub base: VirtAddr,
+    pub base: VirtAddr57,
 }
 
 #[cfg(test)]
@@ -35,7 +35,7 @@ mod tests {
         // Make sure that we can reference a pointer's limit
         let p = DescriptorTablePointer {
             limit: 5,
-            base: VirtAddr::zero(),
+            base: VirtAddr57::zero(),
         };
         let _: &u16 = &p.limit;
     }

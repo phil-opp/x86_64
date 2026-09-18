@@ -3,7 +3,8 @@
 use bit_field::BitField;
 
 use crate::{
-    PrivilegeLevel, VirtAddr,
+    PrivilegeLevel, VirtAddr57,
+    addr::{VirtAddrGeneric, VirtAddrWidth, Width48},
     instructions::segmentation::{CS, Segment},
     structures::paging::{
         Page, PageSize, Size2MiB, Size4KiB,
@@ -13,8 +14,10 @@ use crate::{
 use core::{arch::asm, cmp, convert::TryFrom, fmt};
 
 /// Invalidate the given address in the TLB using the `invlpg` instruction.
+///
+/// This function accepts virtual addresses of any [width](VirtAddrWidth).
 #[inline]
-pub fn flush(addr: VirtAddr) {
+pub fn flush<W: VirtAddrWidth>(addr: VirtAddrGeneric<W>) {
     unsafe {
         asm!("invlpg [{}]", in(reg) addr.as_u64(), options(nostack, preserves_flags));
     }
@@ -32,7 +35,7 @@ pub fn flush_all() {
 #[derive(Debug)]
 pub enum InvPcidCommand {
     /// The logical processor invalidates mappings—except global translations—for the linear address and PCID specified.
-    Address(VirtAddr, Pcid),
+    Address(VirtAddr57, Pcid),
 
     /// The logical processor invalidates all mappings—except global translations—associated with the PCID.
     Single(Pcid),
@@ -225,12 +228,13 @@ impl Invlpgb {
 /// A builder struct to construct the parameters for the `invlpgb` instruction.
 #[derive(Debug, Clone)]
 #[must_use]
-pub struct InvlpgbFlushBuilder<'a, S = Size4KiB>
+pub struct InvlpgbFlushBuilder<'a, S = Size4KiB, W = Width48>
 where
     S: NotGiantPageSize,
+    W: VirtAddrWidth,
 {
     invlpgb: &'a Invlpgb,
-    page_range: Option<PageRange<S>>,
+    page_range: Option<PageRange<S, W>>,
     pcid: Option<Pcid>,
     asid: Option<u16>,
     include_global: bool,
@@ -238,17 +242,19 @@ where
     include_nested_translations: bool,
 }
 
-impl<'a, S> InvlpgbFlushBuilder<'a, S>
+impl<'a, S, W> InvlpgbFlushBuilder<'a, S, W>
 where
     S: NotGiantPageSize,
+    W: VirtAddrWidth,
 {
     /// Flush a range of pages.
     ///
     /// If the range doesn't fit within `invlpgb_count_max`, `invlpgb` is
     /// executed multiple times.
-    pub fn pages<T>(self, page_range: PageRange<T>) -> InvlpgbFlushBuilder<'a, T>
+    pub fn pages<T, V>(self, page_range: PageRange<T, V>) -> InvlpgbFlushBuilder<'a, T, V>
     where
         T: NotGiantPageSize,
+        V: VirtAddrWidth,
     {
         InvlpgbFlushBuilder {
             invlpgb: self.invlpgb,
@@ -317,11 +323,10 @@ where
         if let Some(mut pages) = self.page_range.clone() {
             while !pages.is_empty() {
                 // Calculate out how many pages we still need to flush.
-                let count = Page::<S>::steps_between_impl(&pages.start, &pages.end).0;
+                let count = Page::<S, W>::steps_between_impl(&pages.start, &pages.end).0;
 
                 // Make sure that we never jump the gap in the address space when flushing.
-                let second_half_start =
-                    Page::<S>::containing_address(VirtAddr::new(0xffff_8000_0000_0000));
+                let second_half_start = Page::<S, W>::upper_half_start();
                 let count = if pages.start < second_half_start {
                     let count_to_second_half =
                         Page::steps_between_impl(&pages.start, &second_half_start).0;
@@ -355,7 +360,7 @@ where
             }
         } else {
             unsafe {
-                flush_broadcast::<S>(
+                flush_broadcast::<S, W>(
                     None,
                     self.pcid,
                     self.asid,
@@ -389,8 +394,8 @@ impl fmt::Display for AsidOutOfRangeError {
 
 /// See `INVLPGB` in AMD64 Architecture Programmer's Manual Volume 3
 #[inline]
-unsafe fn flush_broadcast<S>(
-    va_and_count: Option<(Page<S>, u16)>,
+unsafe fn flush_broadcast<S, W>(
+    va_and_count: Option<(Page<S, W>, u16)>,
     pcid: Option<Pcid>,
     asid: Option<u16>,
     include_global: bool,
@@ -398,6 +403,7 @@ unsafe fn flush_broadcast<S>(
     include_nested_translations: bool,
 ) where
     S: NotGiantPageSize,
+    W: VirtAddrWidth,
 {
     let mut rax = 0;
     let mut ecx = 0;

@@ -3,6 +3,7 @@
 use core::fmt;
 
 use super::*;
+use crate::VirtAddr;
 use crate::registers::control::Cr3;
 use crate::structures::paging::page_table::PageTableLevel;
 use crate::structures::paging::{
