@@ -14,6 +14,8 @@
   - The mappings of a `MappedPageTable` can now be displayed.
 - [Increase the Minimum Supported Rust Version to 1.98](https://github.com/rust-osdev/x86_64/pull/604)
 - [make memory encryption bit an upper limit for physical address bits](https://github.com/rust-osdev/x86_64/pull/603)
+- `PageRange` and `PageRangeInclusive` now skip the non-canonical gap of the address space instead of panicking when iterating across it
+  - The iterators, `nth`/`nth_back`, and `len` now use the successor operation (like `Range<Page>` and `RangeInclusive<Page>` with the `Step` impl), so a range that spans the gap contains only the canonical pages on both sides. `Page + u64` and `Page - Page` are unchanged and still perform plain arithmetic.
 
 # 0.15.5 – 2026-07-11
 
