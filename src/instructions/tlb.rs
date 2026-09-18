@@ -3,12 +3,12 @@
 use bit_field::BitField;
 
 use crate::{
-    instructions::segmentation::{Segment, CS},
-    structures::paging::{
-        page::{NotGiantPageSize, PageRange},
-        Page, PageSize, Size2MiB, Size4KiB,
-    },
     PrivilegeLevel, VirtAddr,
+    instructions::segmentation::{CS, Segment},
+    structures::paging::{
+        Page, PageSize, Size2MiB, Size4KiB,
+        page::{NotGiantPageSize, PageRange},
+    },
 };
 use core::{arch::asm, cmp, convert::TryFrom, fmt};
 
@@ -314,7 +314,7 @@ where
 
     /// Execute the flush.
     pub fn flush(&self) {
-        if let Some(mut pages) = self.page_range {
+        if let Some(mut pages) = self.page_range.clone() {
             while !pages.is_empty() {
                 // Calculate out how many pages we still need to flush.
                 let count = Page::<S>::steps_between_impl(&pages.start, &pages.end).0;
