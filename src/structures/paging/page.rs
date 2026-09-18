@@ -502,8 +502,11 @@ impl<S: PageSize> PageRangeInclusive<S> {
         debug_assert!(!self.is_empty());
         if self.start < self.end {
             // Swapping the bounds makes the range empty, even if it covers the whole
-            // address space.
-            core::mem::swap(&mut self.start, &mut self.end);
+            // address space. (Done by hand because `core::mem::swap` lowers to a loop
+            // that kani would need to unwind.)
+            let (start, end) = (self.start, self.end);
+            self.start = end;
+            self.end = start;
         } else if let Some(after_end) = Page::forward_checked_u64(self.end, 1) {
             self.start = after_end;
         } else {
