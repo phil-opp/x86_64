@@ -1,10 +1,10 @@
 //! Provides functions to read and write segment registers.
 
-pub use crate::registers::segmentation::{Segment, Segment64, CS, DS, ES, FS, GS, SS};
+pub use crate::registers::segmentation::{CS, DS, ES, FS, GS, SS, Segment, Segment64};
 use crate::{
+    VirtAddr57,
     registers::model_specific::{FsBase, GsBase, Msr},
     structures::gdt::SegmentSelector,
-    VirtAddr,
 };
 use core::arch::asm;
 
@@ -41,16 +41,16 @@ macro_rules! segment64_impl {
         impl Segment64 for $type {
             const BASE: Msr = <$base>::MSR;
             #[inline]
-            fn read_base() -> VirtAddr {
+            fn read_base() -> VirtAddr57 {
                 unsafe {
                     let val: u64;
                     asm!(concat!("rd", $name, "base {}"), out(reg) val, options(nomem, nostack, preserves_flags));
-                    VirtAddr::new_unsafe(val)
+                    VirtAddr57::new_unsafe(val)
                 }
             }
 
             #[inline]
-            unsafe fn write_base(base: VirtAddr) {
+            unsafe fn write_base(base: VirtAddr57) {
                 unsafe{
                     asm!(concat!("wr", $name, "base {}"), in(reg) base.as_u64(), options(nostack, preserves_flags));
                 }

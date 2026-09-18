@@ -1,18 +1,31 @@
 //! Abstractions for page tables and other paging related structures.
 //!
 //! Page tables translate virtual memory “pages” to physical memory “frames”.
+//!
+//! ## Virtual address width
+//!
+//! The [`Page`] type, the page range types, and the [`Mapper`], [`Translate`], and
+//! [`mapper::CleanUp`] traits are generic over the [width](crate::addr::VirtAddrWidth) of
+//! the virtual addresses they work with. The width defaults to 48 bits
+//! ([`Width48`](crate::addr::Width48), 4-level paging), so `Page<Size4KiB>` is a page in a
+//! 48-bit address space. Use [`Width57`](crate::addr::Width57) for pages in a 57-bit address
+//! space (5-level paging), e.g. `Page<Size4KiB, Width57>`.
+//!
+//! The mapper implementations in this module ([`MappedPageTable`], `OffsetPageTable`,
+//! and `RecursivePageTable`) currently only support 4-level paging, i.e. they only
+//! implement the traits for 48-bit addresses.
 
 pub use self::frame::PhysFrame;
 pub use self::frame_alloc::{FrameAllocator, FrameDeallocator};
 #[doc(no_inline)]
 pub use self::mapper::MappedPageTable;
-#[cfg(target_pointer_width = "64")]
-#[doc(no_inline)]
-pub use self::mapper::OffsetPageTable;
 #[cfg(all(feature = "instructions", target_arch = "x86_64"))]
 #[doc(no_inline)]
 pub use self::mapper::RecursivePageTable;
 pub use self::mapper::{Mapper, Translate};
+#[cfg(target_pointer_width = "64")]
+#[doc(no_inline)]
+pub use self::mapper::{OffsetPageTable, PhysOffset};
 pub use self::page::{Page, PageSize, Size1GiB, Size2MiB, Size4KiB};
 pub use self::page_table::{PageOffset, PageTable, PageTableFlags, PageTableIndex};
 

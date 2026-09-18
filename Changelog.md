@@ -1,5 +1,26 @@
 # Unreleased
 
+## Breaking changes
+
+- [add `Mapper::clear` to clear any page table entry regardless of the present flag](https://github.com/rust-osdev/x86_64/pull/484)
+- [`Mapper::unmap` now also returns the flags of the page ](https://github.com/rust-osdev/x86_64/pull/484)
+- [make `OffsetPageTable` a type alias](https://github.com/rust-osdev/x86_64/pull/576)
+  - To migrate, replace `OffsetPageTable::new` with `OffsetPageTable::from_phys_offset` or `MappedPageTable::from_phys_offset`.
+  - `OffsetPageTable`'s `PageTableFrameMapping` implementation is now public as `PhysOffset`.
+- [make range types `!Copy`](https://github.com/rust-osdev/x86_64/pull/581)
+  - To migrate, use `.clone()` if necessary.
+- [make page types `repr(transparent)` and range types `repr(Rust)`](https://github.com/rust-osdev/x86_64/pull/584)
+- [add `MappedPageTable::display`](https://github.com/rust-osdev/x86_64/pull/574)
+  - The mappings of a `MappedPageTable` can now be displayed.
+- [Increase the Minimum Supported Rust Version to 1.98](https://github.com/rust-osdev/x86_64/pull/604)
+- [make memory encryption bit an upper limit for physical address bits](https://github.com/rust-osdev/x86_64/pull/603)
+- add support for 57-bit virtual addresses (5-level paging)
+  - `VirtAddr` is now an alias for the new `VirtAddr48` type, which is `VirtAddrGeneric<Width48>`. The new `VirtAddr57` type (`VirtAddrGeneric<Width57>`) represents 57-bit canonical addresses. `VirtAddr48` can be converted into `VirtAddr57` using `From`, the reverse conversion is available through `TryFrom`.
+  - Structures and registers that hold linear addresses interpreted by the CPU now use `VirtAddr57`: `InterruptStackFrameValue`, `TaskStateSegment`, `DescriptorTablePointer`, `Entry::set_handler_addr`/`handler_addr`, `HandlerFuncType::to_virt_addr`, `Cr2::read`, `FsBase`, `GsBase`, `KernelGsBase`, `LStar`, `UCet`/`SCet`, `Segment64::read_base`/`write_base`, `read_rip`, and `InvPcidCommand::Address`.
+    - To migrate, convert 48-bit addresses with `.into()` when writing and with `VirtAddr::try_from(..)` when reading.
+  - `Page`, `PageRange`, `PageRangeInclusive`, `MapperFlush`, `UnmappedFrame`, and the `Mapper`, `MapperAllSizes`, `Translate`, and `CleanUp` traits have a new virtual address width parameter that defaults to `Width48`. `Page<S, Width57>` represents a page in a 57-bit address space.
+  - `tlb::flush` accepts virtual addresses of both widths.
+
 # 0.15.5 – 2026-07-11
 
 This release is compatible with Rust nightlies starting with `nightly-2026-07-10` (this only applies when the `nightly` feature is used).
