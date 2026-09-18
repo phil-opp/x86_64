@@ -265,7 +265,7 @@ impl<const MAX: usize> GlobalDescriptorTable<MAX> {
     #[cfg(all(feature = "instructions", target_arch = "x86_64"))]
     fn pointer(&self) -> super::DescriptorTablePointer {
         super::DescriptorTablePointer {
-            base: crate::VirtAddr::new(self.table.as_ptr() as u64),
+            base: crate::VirtAddr57::new(self.table.as_ptr() as u64),
             limit: self.limit(),
         }
     }

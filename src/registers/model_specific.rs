@@ -252,7 +252,7 @@ mod x86_64 {
     use super::*;
     use crate::PhysAddr;
     use crate::PrivilegeLevel;
-    use crate::addr::VirtAddr;
+    use crate::addr::{VirtAddr57, Width57};
     use crate::registers::rflags::RFlags;
     use crate::structures::gdt::SegmentSelector;
     use crate::structures::paging::Page;
@@ -387,8 +387,8 @@ mod x86_64 {
         /// If [`CR4.FSGSBASE`][Cr4Flags::FSGSBASE] is set, the more efficient
         /// [`FS::read_base`] can be used instead.
         #[inline]
-        pub fn read() -> VirtAddr {
-            VirtAddr::new(unsafe { Self::MSR.read() })
+        pub fn read() -> VirtAddr57 {
+            VirtAddr57::new(unsafe { Self::MSR.read() })
         }
 
         /// Write a given virtual address to the FS.Base register.
@@ -401,7 +401,7 @@ mod x86_64 {
         /// The caller must ensure that this write operation has no unsafe side
         /// effects, as the segment base address might be in use.
         #[inline]
-        pub unsafe fn write(address: VirtAddr) {
+        pub unsafe fn write(address: VirtAddr57) {
             let mut msr = Self::MSR;
             unsafe { msr.write(address.as_u64()) };
         }
@@ -413,8 +413,8 @@ mod x86_64 {
         /// If [`CR4.FSGSBASE`][Cr4Flags::FSGSBASE] is set, the more efficient
         /// [`GS::read_base`] can be used instead.
         #[inline]
-        pub fn read() -> VirtAddr {
-            VirtAddr::new(unsafe { Self::MSR.read() })
+        pub fn read() -> VirtAddr57 {
+            VirtAddr57::new(unsafe { Self::MSR.read() })
         }
 
         /// Write a given virtual address to the GS.Base register.
@@ -427,7 +427,7 @@ mod x86_64 {
         /// The caller must ensure that this write operation has no unsafe side
         /// effects, as the segment base address might be in use.
         #[inline]
-        pub unsafe fn write(address: VirtAddr) {
+        pub unsafe fn write(address: VirtAddr57) {
             let mut msr = Self::MSR;
             unsafe { msr.write(address.as_u64()) };
         }
@@ -436,8 +436,8 @@ mod x86_64 {
     impl KernelGsBase {
         /// Read the current KernelGsBase register.
         #[inline]
-        pub fn read() -> VirtAddr {
-            VirtAddr::new(unsafe { Self::MSR.read() })
+        pub fn read() -> VirtAddr57 {
+            VirtAddr57::new(unsafe { Self::MSR.read() })
         }
 
         /// Write a given virtual address to the KernelGsBase register.
@@ -446,7 +446,7 @@ mod x86_64 {
         ///
         /// The caller must ensure that a future call to [`GS::swap`] has no unsafe side effects.
         #[inline]
-        pub unsafe fn write(address: VirtAddr) {
+        pub unsafe fn write(address: VirtAddr57) {
             let mut msr = Self::MSR;
             unsafe { msr.write(address.as_u64()) };
         }
@@ -597,14 +597,14 @@ mod x86_64 {
         /// Read the current LStar register.
         /// This holds the target RIP of a syscall.
         #[inline]
-        pub fn read() -> VirtAddr {
-            VirtAddr::new(unsafe { Self::MSR.read() })
+        pub fn read() -> VirtAddr57 {
+            VirtAddr57::new(unsafe { Self::MSR.read() })
         }
 
         /// Write a given virtual address to the LStar register.
         /// This holds the target RIP of a syscall.
         #[inline]
-        pub fn write(address: VirtAddr) {
+        pub fn write(address: VirtAddr57) {
             let mut msr = Self::MSR;
             unsafe { msr.write(address.as_u64()) };
         }
@@ -673,11 +673,11 @@ mod x86_64 {
 
         /// Read IA32_U_CET. Returns a tuple of the flags and the address to the legacy code page bitmap.
         #[inline]
-        pub fn read() -> (CetFlags, Page) {
+        pub fn read() -> (CetFlags, Page<Size4KiB, Width57>) {
             let value = Self::read_raw();
             let cet_flags = CetFlags::from_bits_truncate(value);
             let legacy_bitmap =
-                Page::from_start_address(VirtAddr::new(value & !(Page::<Size4KiB>::SIZE - 1)))
+                Page::from_start_address(VirtAddr57::new(value & !(Page::<Size4KiB>::SIZE - 1)))
                     .unwrap();
 
             (cet_flags, legacy_bitmap)
@@ -685,7 +685,7 @@ mod x86_64 {
 
         /// Write IA32_U_CET.
         #[inline]
-        pub fn write(flags: CetFlags, legacy_bitmap: Page) {
+        pub fn write(flags: CetFlags, legacy_bitmap: Page<Size4KiB, Width57>) {
             Self::write_raw(flags.bits() | legacy_bitmap.start_address().as_u64());
         }
 
@@ -693,7 +693,7 @@ mod x86_64 {
         #[inline]
         pub fn update<F>(f: F)
         where
-            F: FnOnce(&mut CetFlags, &mut Page),
+            F: FnOnce(&mut CetFlags, &mut Page<Size4KiB, Width57>),
         {
             let (mut flags, mut legacy_bitmap) = Self::read();
             f(&mut flags, &mut legacy_bitmap);
@@ -719,11 +719,11 @@ mod x86_64 {
 
         /// Read IA32_S_CET. Returns a tuple of the flags and the address to the legacy code page bitmap.
         #[inline]
-        pub fn read() -> (CetFlags, Page) {
+        pub fn read() -> (CetFlags, Page<Size4KiB, Width57>) {
             let value = Self::read_raw();
             let cet_flags = CetFlags::from_bits_truncate(value);
             let legacy_bitmap =
-                Page::from_start_address(VirtAddr::new(value & !(Page::<Size4KiB>::SIZE - 1)))
+                Page::from_start_address(VirtAddr57::new(value & !(Page::<Size4KiB>::SIZE - 1)))
                     .unwrap();
 
             (cet_flags, legacy_bitmap)
@@ -731,7 +731,7 @@ mod x86_64 {
 
         /// Write IA32_S_CET.
         #[inline]
-        pub fn write(flags: CetFlags, legacy_bitmap: Page) {
+        pub fn write(flags: CetFlags, legacy_bitmap: Page<Size4KiB, Width57>) {
             Self::write_raw(flags.bits() | legacy_bitmap.start_address().as_u64());
         }
 
@@ -739,7 +739,7 @@ mod x86_64 {
         #[inline]
         pub fn update<F>(f: F)
         where
-            F: FnOnce(&mut CetFlags, &mut Page),
+            F: FnOnce(&mut CetFlags, &mut Page<Size4KiB, Width57>),
         {
             let (mut flags, mut legacy_bitmap) = Self::read();
             f(&mut flags, &mut legacy_bitmap);

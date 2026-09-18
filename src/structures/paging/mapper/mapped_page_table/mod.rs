@@ -6,6 +6,7 @@ mod range_iter;
 pub use self::display::Display;
 #[cfg(target_pointer_width = "64")]
 pub use self::offset_page_table::{OffsetPageTable, PhysOffset};
+use crate::VirtAddr;
 use crate::structures::paging::{
     mapper::*,
     page::AddressNotAligned,

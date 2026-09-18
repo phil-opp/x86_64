@@ -1,5 +1,6 @@
 #![cfg(target_pointer_width = "64")]
 
+use crate::VirtAddr;
 use crate::structures::paging::{PageTable, mapper::*};
 
 /// A Mapper implementation that requires that the complete physical memory is mapped at some

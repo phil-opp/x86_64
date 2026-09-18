@@ -1,6 +1,6 @@
 //! Functions to load GDT, IDT, and TSS structures.
 
-use crate::VirtAddr;
+use crate::VirtAddr57;
 use crate::structures::gdt::SegmentSelector;
 use core::arch::asm;
 
@@ -47,7 +47,7 @@ pub unsafe fn lidt(idt: &DescriptorTablePointer) {
 pub fn sgdt() -> DescriptorTablePointer {
     let mut gdt: DescriptorTablePointer = DescriptorTablePointer {
         limit: 0,
-        base: VirtAddr::new(0),
+        base: VirtAddr57::zero(),
     };
     unsafe {
         asm!("sgdt [{}]", in(reg) &mut gdt, options(nostack, preserves_flags));
@@ -60,7 +60,7 @@ pub fn sgdt() -> DescriptorTablePointer {
 pub fn sidt() -> DescriptorTablePointer {
     let mut idt: DescriptorTablePointer = DescriptorTablePointer {
         limit: 0,
-        base: VirtAddr::new(0),
+        base: VirtAddr57::zero(),
     };
     unsafe {
         asm!("sidt [{}]", in(reg) &mut idt, options(nostack, preserves_flags));

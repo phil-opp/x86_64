@@ -48,10 +48,10 @@ pub fn bochs_breakpoint() {
 /// Gets the current instruction pointer. Note that this is only approximate as it requires a few
 /// instructions to execute.
 #[inline(always)]
-pub fn read_rip() -> crate::VirtAddr {
+pub fn read_rip() -> crate::VirtAddr57 {
     let rip: u64;
     unsafe {
         asm!("lea {}, [rip]", out(reg) rip, options(nostack, nomem, preserves_flags));
     }
-    crate::VirtAddr::new(rip)
+    crate::VirtAddr57::new(rip)
 }
