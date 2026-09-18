@@ -495,19 +495,22 @@ impl<S: PageSize> PageRangeInclusive<S> {
         Page::steps_between_u64(&self.start, &self.end).map_or(0, |steps| steps + 1)
     }
 
-    /// Makes the range empty by moving `start` past `end` (or `end` below `start` if `end`
-    /// is the last page of the address space).
+    /// Makes the range empty, i.e. moves `start` past `end`.
     ///
     /// The range must not be empty already.
     fn exhaust(&mut self) {
         debug_assert!(!self.is_empty());
-        match Page::forward_checked_u64(self.end, 1) {
-            Some(after_end) => self.start = after_end,
-            None => {
-                // `end` is the last page of the address space, so `start` is not the first.
-                self.end = Page::backward_checked_u64(self.start, 1)
-                    .expect("a range that ends at the last page can't start at the first page")
-            }
+        if self.start < self.end {
+            // Swapping the bounds makes the range empty, even if it covers the whole
+            // address space.
+            core::mem::swap(&mut self.start, &mut self.end);
+        } else if let Some(after_end) = Page::forward_checked_u64(self.end, 1) {
+            self.start = after_end;
+        } else {
+            // The single page of the range is the last page of the address space, so it
+            // has a predecessor.
+            self.end = Page::backward_checked_u64(self.start, 1)
+                .expect("the last page of the address space has a predecessor");
         }
     }
 
@@ -789,7 +792,20 @@ mod tests {
         // On 32-bit targets `usize` can't express a skip count that exhausts the range.
         #[cfg(target_pointer_width = "64")]
         {
+            let mut range = Page::range_inclusive(first, last);
             assert_eq!(range.nth(usize::MAX), None);
+            assert!(range.is_empty());
+            assert_eq!(range.len(), 0);
+            assert_eq!(range.next(), None);
+            assert_eq!(range.next_back(), None);
+
+            let mut range = Page::range_inclusive(first, last);
+            assert_eq!(range.nth_back(usize::MAX), None);
+            assert!(range.is_empty());
+
+            let mut range = Page::range_inclusive(first, last);
+            assert_eq!(range.nth((1 << 36) - 1), Some(last));
+            assert_eq!(range.next(), None);
             assert!(range.is_empty());
         }
     }
