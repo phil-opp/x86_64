@@ -31,6 +31,9 @@ use dep_const_fn::const_fn;
 pub trait VirtAddrWidth: Copy + Eq + PartialOrd + Ord + Hash + Sealed {
     /// The number of valid bits in a virtual address of this width.
     const BITS: u32;
+
+    /// The name of the address type of this width, as used in `Debug` output.
+    const TYPE_NAME: &'static str;
 }
 
 /// The width of virtual addresses with 4-level paging: 48 bits are valid.
@@ -43,12 +46,14 @@ pub enum Width57 {}
 
 impl VirtAddrWidth for Width48 {
     const BITS: u32 = 48;
+    const TYPE_NAME: &'static str = "VirtAddr";
 }
 
 impl Sealed for Width48 {}
 
 impl VirtAddrWidth for Width57 {
     const BITS: u32 = 57;
+    const TYPE_NAME: &'static str = "VirtAddr57";
 }
 
 impl Sealed for Width57 {}
@@ -162,7 +167,7 @@ impl<W: VirtAddrWidth> VirtAddrGeneric<W> {
     /// This is 48 for [`VirtAddr48`] and 57 for [`VirtAddr57`].
     pub const BITS: u32 = W::BITS;
 
-    /// The number of addresses in the (virtual) address space, i.e. `2^BITS`.
+    /// The number of canonical addresses, i.e. `2^BITS`.
     const ADDRESS_SPACE_SIZE: u64 = 1 << W::BITS;
 
     /// The number of bits that must be a sign extension of the most significant valid bit.
@@ -397,16 +402,34 @@ impl<W: VirtAddrWidth> VirtAddrGeneric<W> {
         }
     }
 
+    /// Returns the position of this address in the sequence of canonical addresses.
+    ///
+    /// Canonical addresses form a contiguous sequence of `2^BITS` values once the sign
+    /// extension is removed: the lower half maps to `0..2^(BITS-1)` and the upper half to
+    /// `2^(BITS-1)..2^BITS`. This is the inverse of [`from_index`](Self::from_index).
+    #[inline]
+    const fn index(self) -> u64 {
+        self.0 & (Self::ADDRESS_SPACE_SIZE - 1)
+    }
+
+    /// Returns the canonical address at the given position in the sequence of canonical
+    /// addresses, or `None` if the position is out of range.
+    ///
+    /// This is the inverse of [`index`](Self::index).
+    #[inline]
+    const fn from_index(index: u64) -> Option<Self> {
+        if index < Self::ADDRESS_SPACE_SIZE {
+            Some(Self::new_truncate(index))
+        } else {
+            None
+        }
+    }
+
     /// An implementation of steps_between that returns u64. Note that this
     /// function always returns the exact bound, so it doesn't need to return a
     /// lower and upper bound like steps_between does.
     pub(crate) fn steps_between_u64(start: &Self, end: &Self) -> Option<u64> {
-        let mut steps = end.0.checked_sub(start.0)?;
-
-        // Mask away extra bits that appear while jumping the gap.
-        steps &= Self::ADDRESS_SPACE_SIZE - 1;
-
-        Some(steps)
+        end.index().checked_sub(start.index())
     }
 
     // FIXME: Move this into the `Step` impl, once `Step` is stabilized.
@@ -416,64 +439,26 @@ impl<W: VirtAddrWidth> VirtAddrGeneric<W> {
     }
 
     /// An implementation of forward_checked that takes u64 instead of usize.
+    ///
+    /// Unlike [`Add`], this jumps the non-canonical gap of the address space.
     #[inline]
     pub(crate) fn forward_checked_u64(start: Self, count: u64) -> Option<Self> {
-        if count > Self::ADDRESS_SPACE_SIZE {
-            return None;
-        }
-
-        let mut addr = start.0.checked_add(count)?;
-
-        // Look at the bits starting at the most significant valid bit.
-        match addr >> (W::BITS - 1) {
-            0x1 => {
-                // Jump the gap by sign extending the most significant valid bit.
-                addr |= u64::MAX << (W::BITS - 1);
-            }
-            0x2 => {
-                // Address overflow
-                return None;
-            }
-            _ => {}
-        }
-
-        Some(unsafe { Self::new_unsafe(addr) })
+        Self::from_index(start.index().checked_add(count)?)
     }
 
     /// An implementation of backward_checked that takes u64 instead of usize.
+    ///
+    /// Unlike [`Sub`], this jumps the non-canonical gap of the address space.
     #[cfg(feature = "step_trait")]
     #[inline]
     pub(crate) fn backward_checked_u64(start: Self, count: u64) -> Option<Self> {
-        if count > Self::ADDRESS_SPACE_SIZE {
-            return None;
-        }
-
-        let mut addr = start.0.checked_sub(count)?;
-
-        // The value of the bits starting at the most significant valid bit for
-        // addresses in the upper half of the address space (all ones).
-        let upper_half = u64::MAX >> (W::BITS - 1);
-
-        // Look at the bits starting at the most significant valid bit.
-        match addr >> (W::BITS - 1) {
-            bits if bits == upper_half - 1 => {
-                // Jump the gap by sign extending the most significant valid bit.
-                addr &= (1 << (W::BITS - 1)) - 1;
-            }
-            bits if bits == upper_half - 2 => {
-                // Address underflow
-                return None;
-            }
-            _ => {}
-        }
-
-        Some(unsafe { Self::new_unsafe(addr) })
+        Self::from_index(start.index().checked_sub(count)?)
     }
 }
 
 impl<W: VirtAddrWidth> fmt::Debug for VirtAddrGeneric<W> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("VirtAddr")
+        f.debug_tuple(W::TYPE_NAME)
             .field(&format_args!("{:#x}", self.0))
             .finish()
     }
@@ -688,12 +673,6 @@ impl RawVirtAddr {
     #[inline]
     pub const fn is_null(self) -> bool {
         self.0 == 0
-    }
-
-    /// Returns whether the address is canonical for the given [width](VirtAddrWidth).
-    #[inline]
-    pub const fn is_canonical<W: VirtAddrWidth>(self) -> bool {
-        VirtAddrGeneric::<W>::try_new(self.0).is_ok()
     }
 
     /// Tries to convert the address into a canonical address of the given
@@ -1250,15 +1229,11 @@ mod tests {
         let raw = RawVirtAddr::new(0xffff_8000_0000_1234);
         assert_eq!(raw.try_into_48().unwrap(), VirtAddr48::new(raw.as_u64()));
         assert_eq!(raw.try_into_57().unwrap(), VirtAddr57::new(raw.as_u64()));
-        assert!(raw.is_canonical::<Width48>());
-        assert!(raw.is_canonical::<Width57>());
 
         let only57 = RawVirtAddr::new(0x0000_8000_0000_0000);
         assert!(only57.try_into_48().is_err());
         assert!(VirtAddr48::try_from(only57).is_err());
         assert_eq!(only57.try_into_57().unwrap().as_u64(), only57.as_u64());
-        assert!(!only57.is_canonical::<Width48>());
-        assert!(only57.is_canonical::<Width57>());
 
         let invalid = RawVirtAddr::new(0x0100_0000_0000_0000);
         assert!(invalid.try_into_48().is_err());
@@ -1362,206 +1337,74 @@ mod tests {
         assert_eq!(VirtAddr57::new_truncate(122 << 56), VirtAddr57(0));
     }
 
-    #[test]
+    /// Checks the `Step` implementation around the non-canonical gap of the address space
+    /// of width `W`.
+    ///
+    /// All addresses are expressed relative to the gap, so the same checks apply to both
+    /// widths.
     #[cfg(feature = "step_trait")]
-    fn virtaddr_step_forward() {
-        assert_eq!(Step::forward(VirtAddr(0), 0), VirtAddr(0));
-        assert_eq!(Step::forward(VirtAddr(0), 1), VirtAddr(1));
-        assert_eq!(
-            Step::forward(VirtAddr(0x7fff_ffff_ffff), 1),
-            VirtAddr(0xffff_8000_0000_0000)
-        );
-        assert_eq!(
-            Step::forward(VirtAddr(0xffff_8000_0000_0000), 1),
-            VirtAddr(0xffff_8000_0000_0001)
-        );
-        assert_eq!(
-            Step::forward_checked(VirtAddr(0xffff_ffff_ffff_ffff), 1),
-            None
-        );
+    fn check_step_around_gap<W: VirtAddrWidth>() {
+        let addr = |addr: u64| unsafe { VirtAddrGeneric::<W>::new_unsafe(addr) };
+        let lower_end = VirtAddrGeneric::<W>::lower_half_end();
+        let upper_start = VirtAddrGeneric::<W>::upper_half_start();
+        let last = addr(u64::MAX);
+        // The number of addresses in each half of the address space.
         #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::forward(VirtAddr(0x7fff_ffff_ffff), 0x1234_5678_9abd),
-            VirtAddr(0xffff_9234_5678_9abc)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::forward(VirtAddr(0x7fff_ffff_ffff), 0x8000_0000_0000),
-            VirtAddr(0xffff_ffff_ffff_ffff)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::forward(VirtAddr(0x7fff_ffff_ff00), 0x8000_0000_00ff),
-            VirtAddr(0xffff_ffff_ffff_ffff)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::forward_checked(VirtAddr(0x7fff_ffff_ff00), 0x8000_0000_0100),
-            None
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::forward_checked(VirtAddr(0x7fff_ffff_ffff), 0x8000_0000_0001),
-            None
-        );
-    }
+        let half = 1u64 << (W::BITS - 1);
 
-    #[test]
-    #[cfg(feature = "step_trait")]
-    fn virtaddr57_step_forward() {
-        assert_eq!(Step::forward(VirtAddr57(0), 0), VirtAddr57(0));
-        assert_eq!(Step::forward(VirtAddr57(0), 1), VirtAddr57(1));
-        // The 48-bit gap is not a gap for 57-bit addresses.
-        assert_eq!(
-            Step::forward(VirtAddr57(0x7fff_ffff_ffff), 1),
-            VirtAddr57(0x8000_0000_0000)
-        );
-        assert_eq!(
-            Step::forward(VirtAddr57(0x00ff_ffff_ffff_ffff), 1),
-            VirtAddr57(0xff00_0000_0000_0000)
-        );
-        assert_eq!(
-            Step::forward(VirtAddr57(0xff00_0000_0000_0000), 1),
-            VirtAddr57(0xff00_0000_0000_0001)
-        );
-        assert_eq!(
-            Step::forward_checked(VirtAddr57(0xffff_ffff_ffff_ffff), 1),
-            None
-        );
+        // forward
+        assert_eq!(Step::forward(addr(0), 0), addr(0));
+        assert_eq!(Step::forward(addr(0), 1), addr(1));
+        assert_eq!(Step::forward(lower_end, 1), upper_start);
+        assert_eq!(Step::forward(upper_start, 1), upper_start + 1);
+        assert_eq!(Step::forward_checked(last, 1), None);
         #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::forward(VirtAddr57(0x00ff_ffff_ffff_ffff), 0x0012_3456_789a_bcdf),
-            VirtAddr57(0xff12_3456_789a_bcde)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::forward(VirtAddr57(0x00ff_ffff_ffff_ffff), 0x0100_0000_0000_0000),
-            VirtAddr57(0xffff_ffff_ffff_ffff)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::forward_checked(VirtAddr57(0x00ff_ffff_ffff_ffff), 0x0100_0000_0000_0001),
-            None
-        );
-    }
+        {
+            let half = half as usize;
+            assert_eq!(
+                Step::forward(lower_end, 0x1234_5678_9abd),
+                upper_start + 0x1234_5678_9abc
+            );
+            assert_eq!(Step::forward(lower_end, half), last);
+            assert_eq!(Step::forward(lower_end - 0xff, half + 0xff), last);
+            assert_eq!(Step::forward_checked(lower_end - 0xff, half + 0x100), None);
+            assert_eq!(Step::forward_checked(lower_end, half + 1), None);
+        }
 
-    #[test]
-    #[cfg(feature = "step_trait")]
-    fn virtaddr_step_backward() {
-        assert_eq!(Step::backward(VirtAddr(0), 0), VirtAddr(0));
-        assert_eq!(Step::backward_checked(VirtAddr(0), 1), None);
-        assert_eq!(Step::backward(VirtAddr(1), 1), VirtAddr(0));
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_8000_0000_0000), 1),
-            VirtAddr(0x7fff_ffff_ffff)
-        );
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_8000_0000_0001), 1),
-            VirtAddr(0xffff_8000_0000_0000)
-        );
+        // backward
+        assert_eq!(Step::backward(addr(0), 0), addr(0));
+        assert_eq!(Step::backward_checked(addr(0), 1), None);
+        assert_eq!(Step::backward(addr(1), 1), addr(0));
+        assert_eq!(Step::backward(upper_start, 1), lower_end);
+        assert_eq!(Step::backward(upper_start + 1, 1), upper_start);
         #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_9234_5678_9abc), 0x1234_5678_9abd),
-            VirtAddr(0x7fff_ffff_ffff)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_8000_0000_0000), 0x8000_0000_0000),
-            VirtAddr(0)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_8000_0000_0000), 0x7fff_ffff_ff01),
-            VirtAddr(0xff)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::backward_checked(VirtAddr(0xffff_8000_0000_0000), 0x8000_0000_0001),
-            None
-        );
-    }
+        {
+            let half = half as usize;
+            assert_eq!(
+                Step::backward(upper_start + 0x1234_5678_9abc, 0x1234_5678_9abd),
+                lower_end
+            );
+            assert_eq!(Step::backward(upper_start, half), addr(0));
+            assert_eq!(Step::backward(upper_start, half - 0xff), addr(0xff));
+            assert_eq!(Step::backward_checked(upper_start, half + 1), None);
+        }
 
-    #[test]
-    #[cfg(feature = "step_trait")]
-    fn virtaddr57_step_backward() {
-        assert_eq!(Step::backward(VirtAddr57(0), 0), VirtAddr57(0));
-        assert_eq!(Step::backward_checked(VirtAddr57(0), 1), None);
-        assert_eq!(Step::backward(VirtAddr57(1), 1), VirtAddr57(0));
-        // The 48-bit gap is not a gap for 57-bit addresses.
+        // steps_between
+        assert_eq!(Step::steps_between(&addr(0), &addr(0)), (0, Some(0)));
+        assert_eq!(Step::steps_between(&addr(0), &addr(1)), (1, Some(1)));
+        assert_eq!(Step::steps_between(&addr(1), &addr(0)), (0, None));
+        assert_eq!(Step::steps_between(&lower_end, &upper_start), (1, Some(1)));
+        assert_eq!(Step::steps_between(&upper_start, &lower_end), (0, None));
         assert_eq!(
-            Step::backward(VirtAddr57(0xffff_8000_0000_0000), 1),
-            VirtAddr57(0xffff_7fff_ffff_ffff)
-        );
-        assert_eq!(
-            Step::backward(VirtAddr57(0xff00_0000_0000_0000), 1),
-            VirtAddr57(0x00ff_ffff_ffff_ffff)
-        );
-        assert_eq!(
-            Step::backward(VirtAddr57(0xff00_0000_0000_0001), 1),
-            VirtAddr57(0xff00_0000_0000_0000)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::backward(VirtAddr57(0xff12_3456_789a_bcde), 0x0012_3456_789a_bcdf),
-            VirtAddr57(0x00ff_ffff_ffff_ffff)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::backward(VirtAddr57(0xff00_0000_0000_0000), 0x0100_0000_0000_0000),
-            VirtAddr57(0)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::backward_checked(VirtAddr57(0xff00_0000_0000_0000), 0x0100_0000_0000_0001),
-            None
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "step_trait")]
-    fn virtaddr_steps_between() {
-        assert_eq!(
-            Step::steps_between(&VirtAddr(0), &VirtAddr(0)),
+            Step::steps_between(&upper_start, &upper_start),
             (0, Some(0))
         );
         assert_eq!(
-            Step::steps_between(&VirtAddr(0), &VirtAddr(1)),
-            (1, Some(1))
-        );
-        assert_eq!(Step::steps_between(&VirtAddr(1), &VirtAddr(0)), (0, None));
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0x7fff_ffff_ffff),
-                &VirtAddr(0xffff_8000_0000_0000)
-            ),
+            Step::steps_between(&upper_start, &(upper_start + 1)),
             (1, Some(1))
         );
         assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0xffff_8000_0000_0000),
-                &VirtAddr(0x7fff_ffff_ffff)
-            ),
-            (0, None)
-        );
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0xffff_8000_0000_0000),
-                &VirtAddr(0xffff_8000_0000_0000)
-            ),
-            (0, Some(0))
-        );
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0xffff_8000_0000_0000),
-                &VirtAddr(0xffff_8000_0000_0001)
-            ),
-            (1, Some(1))
-        );
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0xffff_8000_0000_0001),
-                &VirtAddr(0xffff_8000_0000_0000)
-            ),
+            Step::steps_between(&(upper_start + 1), &upper_start),
             (0, None)
         );
         // Make sure that we handle `steps > u32::MAX` correctly on 32-bit
@@ -1571,44 +1414,65 @@ mod tests {
         // bound of `usize::MAX` and don't return an upper bound.
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
-            Step::steps_between(&VirtAddr(0), &VirtAddr(0x1_0000_0000)),
+            Step::steps_between(&addr(0), &addr(0x1_0000_0000)),
             (0x1_0000_0000, Some(0x1_0000_0000))
         );
         #[cfg(not(target_pointer_width = "64"))]
         assert_eq!(
-            Step::steps_between(&VirtAddr(0), &VirtAddr(0x1_0000_0000)),
+            Step::steps_between(&addr(0), &addr(0x1_0000_0000)),
             (usize::MAX, None)
         );
+
+        // overflowing
+        assert_eq!(
+            Step::forward_overflowing(lower_end, 1),
+            (upper_start, false)
+        );
+        assert_eq!(
+            Step::backward_overflowing(upper_start, 1),
+            (lower_end, false)
+        );
+        assert_eq!(Step::forward_overflowing(addr(0), 0), (addr(0), false));
+        assert!(Step::forward_overflowing(last, 1).1);
+        assert!(Step::backward_overflowing(addr(0), 1).1);
     }
 
     #[test]
     #[cfg(feature = "step_trait")]
-    fn virtaddr57_steps_between() {
+    fn virtaddr_step_around_gap() {
+        check_step_around_gap::<Width48>();
+        check_step_around_gap::<Width57>();
+    }
+
+    #[test]
+    #[cfg(feature = "step_trait")]
+    fn virtaddr_gap_positions() {
+        // Make sure the relative checks above cover the right absolute addresses.
+        assert_eq!(VirtAddr48::lower_half_end(), VirtAddr(0x7fff_ffff_ffff));
         assert_eq!(
-            Step::steps_between(&VirtAddr57(0), &VirtAddr57(1)),
-            (1, Some(1))
+            VirtAddr48::upper_half_start(),
+            VirtAddr(0xffff_8000_0000_0000)
         );
         assert_eq!(
-            Step::steps_between(&VirtAddr57(1), &VirtAddr57(0)),
-            (0, None)
+            VirtAddr57::lower_half_end(),
+            VirtAddr57(0x00ff_ffff_ffff_ffff)
         );
         assert_eq!(
-            Step::steps_between(
-                &VirtAddr57(0x00ff_ffff_ffff_ffff),
-                &VirtAddr57(0xff00_0000_0000_0000)
-            ),
-            (1, Some(1))
+            VirtAddr57::upper_half_start(),
+            VirtAddr57(0xff00_0000_0000_0000)
+        );
+
+        // The 48-bit gap is not a gap for 57-bit addresses.
+        assert_eq!(
+            Step::forward(VirtAddr57(0x7fff_ffff_ffff), 1),
+            VirtAddr57(0x8000_0000_0000)
         );
         assert_eq!(
-            Step::steps_between(
-                &VirtAddr57(0xff00_0000_0000_0000),
-                &VirtAddr57(0x00ff_ffff_ffff_ffff)
-            ),
-            (0, None)
+            Step::backward(VirtAddr57(0xffff_8000_0000_0000), 1),
+            VirtAddr57(0xffff_7fff_ffff_ffff)
         );
-        // The 48-bit gap is not a gap for 57-bit addresses, but the 57-bit gap
-        // between the two addresses is skipped. The number of steps doesn't fit
-        // into `usize` on 32-bit targets.
+        // The number of steps across the 57-bit gap doesn't fit into `usize` on 32-bit
+        // targets.
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             Step::steps_between(
@@ -1617,34 +1481,6 @@ mod tests {
             ),
             (0x01ff_0000_0000_0001, Some(0x01ff_0000_0000_0001))
         );
-        #[cfg(not(target_pointer_width = "64"))]
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr57(0x7fff_ffff_ffff),
-                &VirtAddr57(0xffff_8000_0000_0000)
-            ),
-            (usize::MAX, None)
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "step_trait")]
-    fn virtaddr_step_overflowing() {
-        assert_eq!(
-            Step::forward_overflowing(VirtAddr(0x7fff_ffff_ffff), 1),
-            (VirtAddr(0xffff_8000_0000_0000), false)
-        );
-        assert_eq!(
-            Step::backward_overflowing(VirtAddr(0xffff_8000_0000_0000), 1),
-            (VirtAddr(0x7fff_ffff_ffff), false)
-        );
-        assert_eq!(
-            Step::forward_overflowing(VirtAddr(0), 0),
-            (VirtAddr(0), false)
-        );
-
-        assert!(Step::forward_overflowing(VirtAddr(0xffff_ffff_ffff_ffff), 1).1);
-        assert!(Step::backward_overflowing(VirtAddr(0), 1).1);
     }
 
     #[test]
@@ -1724,73 +1560,48 @@ mod proofs {
     // implementation of VirtAddr.
 
     // This harness proves that our implementation can correctly take 0 or 1
-    // step starting from any address.
-    #[kani::proof]
-    fn forward_base_case() {
-        let start = kani::any::<VirtAddr>();
+    // step starting from any address of width `W`.
+    fn forward_base_case_harness<W: VirtAddrWidth>() {
+        let start = kani::any::<VirtAddrGeneric<W>>();
         let start_raw = start.as_u64();
+        let lower_end = VirtAddrGeneric::<W>::lower_half_end().as_u64();
+        let upper_start = VirtAddrGeneric::<W>::upper_half_start().as_u64();
 
         // Adding 0 to any address should always yield the same address.
         let same = Step::forward(start, 0);
         assert!(start == same);
 
         // Manually calculate the expected address after stepping once.
-        let expected = match start_raw {
-            // Adding 1 to addresses in this range don't require gap jumps, so
-            // we can just add 1.
-            0x0000_0000_0000_0000..=0x0000_7fff_ffff_fffe => Some(start_raw + 1),
+        let expected = if start_raw == lower_end {
             // Adding 1 to this address jumps the gap.
-            0x0000_7fff_ffff_ffff => Some(0xffff_8000_0000_0000),
-            // The range of non-canonical addresses.
-            0x0000_8000_0000_0000..=0xffff_7fff_ffff_ffff => unreachable!(),
+            Some(upper_start)
+        } else if start_raw == u64::MAX {
+            // Adding 1 to this address causes an overflow.
+            None
+        } else {
+            // The range of non-canonical addresses can't occur.
+            assert!(start_raw < lower_end || start_raw >= upper_start);
             // Adding 1 to addresses in this range don't require gap jumps, so
             // we can just add 1.
-            0xffff_8000_0000_0000..=0xffff_ffff_ffff_fffe => Some(start_raw + 1),
-            // Adding 1 to this address causes an overflow.
-            0xffff_ffff_ffff_ffff => None,
+            Some(start_raw + 1)
         };
         if let Some(expected) = expected {
             // Verify that `expected` is a valid address.
-            assert!(VirtAddr::try_new(expected).is_ok());
+            assert!(VirtAddrGeneric::<W>::try_new(expected).is_ok());
         }
         // Verify `forward_checked`.
         let next = Step::forward_checked(start, 1);
-        assert!(next.map(VirtAddr::as_u64) == expected);
+        assert!(next.map(VirtAddrGeneric::as_u64) == expected);
     }
 
-    // This harness proves that our implementation can correctly take 0 or 1
-    // step starting from any 57-bit address.
+    #[kani::proof]
+    fn forward_base_case() {
+        forward_base_case_harness::<Width48>();
+    }
+
     #[kani::proof]
     fn forward_base_case_57() {
-        let start = kani::any::<VirtAddr57>();
-        let start_raw = start.as_u64();
-
-        // Adding 0 to any address should always yield the same address.
-        let same = Step::forward(start, 0);
-        assert!(start == same);
-
-        // Manually calculate the expected address after stepping once.
-        let expected = match start_raw {
-            // Adding 1 to addresses in this range don't require gap jumps, so
-            // we can just add 1.
-            0x0000_0000_0000_0000..=0x00ff_ffff_ffff_fffe => Some(start_raw + 1),
-            // Adding 1 to this address jumps the gap.
-            0x00ff_ffff_ffff_ffff => Some(0xff00_0000_0000_0000),
-            // The range of non-canonical addresses.
-            0x0100_0000_0000_0000..=0xfeff_ffff_ffff_ffff => unreachable!(),
-            // Adding 1 to addresses in this range don't require gap jumps, so
-            // we can just add 1.
-            0xff00_0000_0000_0000..=0xffff_ffff_ffff_fffe => Some(start_raw + 1),
-            // Adding 1 to this address causes an overflow.
-            0xffff_ffff_ffff_ffff => None,
-        };
-        if let Some(expected) = expected {
-            // Verify that `expected` is a valid address.
-            assert!(VirtAddr57::try_new(expected).is_ok());
-        }
-        // Verify `forward_checked`.
-        let next = Step::forward_checked(start, 1);
-        assert!(next.map(VirtAddr57::as_u64) == expected);
+        forward_base_case_harness::<Width57>();
     }
 
     // This harness proves that the result of taking two small steps is the

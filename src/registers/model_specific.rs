@@ -252,7 +252,7 @@ mod x86_64 {
     use super::*;
     use crate::PhysAddr;
     use crate::PrivilegeLevel;
-    use crate::addr::{RawVirtAddr, VirtAddr57, VirtAddrGeneric, VirtAddrWidth, Width57};
+    use crate::addr::{RawVirtAddr, VirtAddrGeneric, VirtAddrWidth};
     use crate::registers::rflags::RFlags;
     use crate::structures::gdt::SegmentSelector;
     use crate::structures::paging::Page;
@@ -687,21 +687,20 @@ mod x86_64 {
             }
         }
 
-        /// Read IA32_U_CET. Returns a tuple of the flags and the address to the legacy code page bitmap.
+        /// Read IA32_U_CET. Returns a tuple of the flags and the (page aligned) address of the
+        /// legacy code page bitmap.
         #[inline]
-        pub fn read() -> (CetFlags, Page<Size4KiB, Width57>) {
+        pub fn read() -> (CetFlags, RawVirtAddr) {
             let value = Self::read_raw();
             let cet_flags = CetFlags::from_bits_truncate(value);
-            let legacy_bitmap =
-                Page::from_start_address(VirtAddr57::new(value & !(Page::<Size4KiB>::SIZE - 1)))
-                    .unwrap();
+            let legacy_bitmap = RawVirtAddr::new(value & !(Page::<Size4KiB>::SIZE - 1));
 
             (cet_flags, legacy_bitmap)
         }
 
         /// Write IA32_U_CET.
         #[inline]
-        pub fn write(flags: CetFlags, legacy_bitmap: Page<Size4KiB, Width57>) {
+        pub fn write<W: VirtAddrWidth>(flags: CetFlags, legacy_bitmap: Page<Size4KiB, W>) {
             Self::write_raw(flags.bits() | legacy_bitmap.start_address().as_u64());
         }
 
@@ -709,11 +708,15 @@ mod x86_64 {
         #[inline]
         pub fn update<F>(f: F)
         where
-            F: FnOnce(&mut CetFlags, &mut Page<Size4KiB, Width57>),
+            F: FnOnce(&mut CetFlags, &mut RawVirtAddr),
         {
             let (mut flags, mut legacy_bitmap) = Self::read();
             f(&mut flags, &mut legacy_bitmap);
-            Self::write(flags, legacy_bitmap);
+            assert!(
+                legacy_bitmap.as_u64() % Page::<Size4KiB>::SIZE == 0,
+                "the legacy code page bitmap must be page aligned"
+            );
+            Self::write_raw(flags.bits() | legacy_bitmap.as_u64());
         }
     }
 
@@ -733,21 +736,20 @@ mod x86_64 {
             }
         }
 
-        /// Read IA32_S_CET. Returns a tuple of the flags and the address to the legacy code page bitmap.
+        /// Read IA32_S_CET. Returns a tuple of the flags and the (page aligned) address of the
+        /// legacy code page bitmap.
         #[inline]
-        pub fn read() -> (CetFlags, Page<Size4KiB, Width57>) {
+        pub fn read() -> (CetFlags, RawVirtAddr) {
             let value = Self::read_raw();
             let cet_flags = CetFlags::from_bits_truncate(value);
-            let legacy_bitmap =
-                Page::from_start_address(VirtAddr57::new(value & !(Page::<Size4KiB>::SIZE - 1)))
-                    .unwrap();
+            let legacy_bitmap = RawVirtAddr::new(value & !(Page::<Size4KiB>::SIZE - 1));
 
             (cet_flags, legacy_bitmap)
         }
 
         /// Write IA32_S_CET.
         #[inline]
-        pub fn write(flags: CetFlags, legacy_bitmap: Page<Size4KiB, Width57>) {
+        pub fn write<W: VirtAddrWidth>(flags: CetFlags, legacy_bitmap: Page<Size4KiB, W>) {
             Self::write_raw(flags.bits() | legacy_bitmap.start_address().as_u64());
         }
 
@@ -755,11 +757,15 @@ mod x86_64 {
         #[inline]
         pub fn update<F>(f: F)
         where
-            F: FnOnce(&mut CetFlags, &mut Page<Size4KiB, Width57>),
+            F: FnOnce(&mut CetFlags, &mut RawVirtAddr),
         {
             let (mut flags, mut legacy_bitmap) = Self::read();
             f(&mut flags, &mut legacy_bitmap);
-            Self::write(flags, legacy_bitmap);
+            assert!(
+                legacy_bitmap.as_u64() % Page::<Size4KiB>::SIZE == 0,
+                "the legacy code page bitmap must be page aligned"
+            );
+            Self::write_raw(flags.bits() | legacy_bitmap.as_u64());
         }
     }
 

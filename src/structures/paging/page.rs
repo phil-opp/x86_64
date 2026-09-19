@@ -759,13 +759,11 @@ mod tests {
         assert!(Page::<Size4KiB>::try_from(only57).is_err());
     }
 
-    #[test]
-    pub fn test_page_ranges() {
+    fn check_page_ranges<W: VirtAddrWidth>(start_addr: VirtAddrGeneric<W>) {
         let page_size = Size4KiB::SIZE;
         let number = 1000;
 
-        let start_addr = VirtAddr::new(0xdead_beaf);
-        let start: Page = Page::containing_address(start_addr);
+        let start: Page<Size4KiB, W> = Page::containing_address(start_addr);
         let end = start + number;
 
         let mut range = Page::range(start, end);
@@ -788,32 +786,10 @@ mod tests {
     }
 
     #[test]
-    pub fn test_page_ranges_57() {
-        let page_size = Size4KiB::SIZE;
-        let number = 1000;
-
+    pub fn test_page_ranges() {
+        check_page_ranges(VirtAddr::new(0xdead_beaf));
         // This address is in the 48-bit gap, but valid for 57-bit addresses.
-        let start_addr = VirtAddr57::new(0x0000_8000_dead_beaf);
-        let start: Page<Size4KiB, Width57> = Page::containing_address(start_addr);
-        let end = start + number;
-
-        let mut range = Page::range(start, end);
-        for i in 0..number {
-            assert_eq!(
-                range.next(),
-                Some(Page::containing_address(start_addr + page_size * i))
-            );
-        }
-        assert_eq!(range.next(), None);
-
-        let mut range_inclusive = Page::range_inclusive(start, end);
-        for i in 0..=number {
-            assert_eq!(
-                range_inclusive.next(),
-                Some(Page::containing_address(start_addr + page_size * i))
-            );
-        }
-        assert_eq!(range_inclusive.next(), None);
+        check_page_ranges(VirtAddr57::new(0x0000_8000_dead_beaf));
     }
 
     #[test]
@@ -936,206 +912,162 @@ mod tests {
         assert_eq!(range_inclusive.len(), 51);
     }
 
-    #[test]
+    /// Checks the `Step` implementation of pages around the non-canonical gap of the
+    /// address space of width `W`.
+    ///
+    /// All pages are expressed relative to the gap, so the same checks apply to both widths.
     #[cfg(feature = "step_trait")]
-    fn page_step_forward() {
-        let test_cases = [
-            (0, 0, Some(0)),
-            (0, 1, Some(0x1000)),
-            (0x1000, 1, Some(0x2000)),
-            (0x7fff_ffff_f000, 1, Some(0xffff_8000_0000_0000)),
-            (0xffff_8000_0000_0000, 1, Some(0xffff_8000_0000_1000)),
-            (0xffff_ffff_ffff_f000, 1, None),
-            #[cfg(target_pointer_width = "64")]
-            (0x7fff_ffff_f000, 0x1_2345_6789, Some(0xffff_9234_5678_8000)),
-            #[cfg(target_pointer_width = "64")]
-            (0x7fff_ffff_f000, 0x8_0000_0000, Some(0xffff_ffff_ffff_f000)),
-            #[cfg(target_pointer_width = "64")]
-            (0x7fff_fff0_0000, 0x8_0000_00ff, Some(0xffff_ffff_ffff_f000)),
-            #[cfg(target_pointer_width = "64")]
-            (0x7fff_fff0_0000, 0x8_0000_0100, None),
-            #[cfg(target_pointer_width = "64")]
-            (0x7fff_ffff_f000, 0x8_0000_0001, None),
-            // Make sure that we handle `steps * PAGE_SIZE > u32::MAX`
-            // correctly on 32-bit targets.
-            (0, 0x10_0000, Some(0x1_0000_0000)),
-        ];
-        for (start, count, result) in test_cases {
-            let start = Page::<Size4KiB>::from_start_address(VirtAddr::new(start)).unwrap();
-            let result = result
-                .map(|result| Page::<Size4KiB>::from_start_address(VirtAddr::new(result)).unwrap());
-            assert_eq!(Step::forward_checked(start, count), result);
+    fn check_page_step_around_gap<W: VirtAddrWidth>() {
+        let page = |addr: u64| {
+            Page::<Size4KiB, W>::from_start_address(VirtAddrGeneric::new(addr)).unwrap()
+        };
+        let lower_end = Page::<Size4KiB, W>::lower_half_end();
+        let upper_start = Page::<Size4KiB, W>::upper_half_start();
+        let last = Page::<Size4KiB, W>::containing_address(VirtAddrGeneric::new(u64::MAX));
+        // The number of pages in each half of the address space.
+        #[cfg(target_pointer_width = "64")]
+        let half = (1u64 << (W::BITS - 1)) / Size4KiB::SIZE;
+
+        // forward
+        assert_eq!(Step::forward_checked(page(0), 0), Some(page(0)));
+        assert_eq!(Step::forward_checked(page(0), 1), Some(page(0x1000)));
+        assert_eq!(Step::forward_checked(page(0x1000), 1), Some(page(0x2000)));
+        assert_eq!(Step::forward_checked(lower_end, 1), Some(upper_start));
+        assert_eq!(Step::forward_checked(upper_start, 1), Some(upper_start + 1));
+        assert_eq!(Step::forward_checked(last, 1), None);
+        // Make sure that we handle `steps * PAGE_SIZE > u32::MAX` correctly on 32-bit targets.
+        assert_eq!(
+            Step::forward_checked(page(0), 0x10_0000),
+            Some(page(0x1_0000_0000))
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            let half = half as usize;
+            assert_eq!(
+                Step::forward_checked(lower_end, 0x1_2345_6789),
+                Some(upper_start + 0x1_2345_6788)
+            );
+            assert_eq!(Step::forward_checked(lower_end, half), Some(last));
+            assert_eq!(
+                Step::forward_checked(lower_end - 0xff, half + 0xff),
+                Some(last)
+            );
+            assert_eq!(Step::forward_checked(lower_end - 0xff, half + 0x100), None);
+            assert_eq!(Step::forward_checked(lower_end, half + 1), None);
         }
+
+        // backward
+        assert_eq!(Step::backward_checked(page(0), 0), Some(page(0)));
+        assert_eq!(Step::backward_checked(page(0), 1), None);
+        assert_eq!(Step::backward_checked(page(0x1000), 1), Some(page(0)));
+        assert_eq!(Step::backward_checked(upper_start, 1), Some(lower_end));
+        assert_eq!(
+            Step::backward_checked(upper_start + 1, 1),
+            Some(upper_start)
+        );
+        // Make sure that we handle `steps * PAGE_SIZE > u32::MAX` correctly on 32-bit targets.
+        assert_eq!(
+            Step::backward_checked(page(0x1_0000_0000), 0x10_0000),
+            Some(page(0))
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            let half = half as usize;
+            assert_eq!(
+                Step::backward_checked(upper_start + 0x1_2345_6788, 0x1_2345_6789),
+                Some(lower_end)
+            );
+            assert_eq!(Step::backward_checked(upper_start, half), Some(page(0)));
+            assert_eq!(
+                Step::backward_checked(upper_start, half - 0xff),
+                Some(page(0xff000))
+            );
+            assert_eq!(Step::backward_checked(upper_start, half + 1), None);
+        }
+
+        // steps_between
+        assert_eq!(Step::steps_between(&page(0), &page(0)), (0, Some(0)));
+        assert_eq!(Step::steps_between(&page(0), &page(0x1000)), (1, Some(1)));
+        assert_eq!(Step::steps_between(&page(0x1000), &page(0)), (0, None));
+        assert_eq!(
+            Step::steps_between(&page(0x1000), &page(0x1000)),
+            (0, Some(0))
+        );
+        assert_eq!(Step::steps_between(&lower_end, &upper_start), (1, Some(1)));
+        assert_eq!(Step::steps_between(&upper_start, &lower_end), (0, None));
+        assert_eq!(
+            Step::steps_between(&upper_start, &upper_start),
+            (0, Some(0))
+        );
+        assert_eq!(
+            Step::steps_between(&upper_start, &(upper_start + 1)),
+            (1, Some(1))
+        );
+        assert_eq!(
+            Step::steps_between(&(upper_start + 1), &upper_start),
+            (0, None)
+        );
+        // Make sure that we handle `steps * PAGE_SIZE > u32::MAX` correctly on 32-bit
+        // targets.
+        assert_eq!(
+            Step::steps_between(&page(0), &page(0x1_0000_0000)),
+            (0x10_0000, Some(0x10_0000))
+        );
+        // The returned bounds are different when `steps` doesn't fit in
+        // into `usize`. On 64-bit targets, `0x1_0000_0000` fits into
+        // `usize`, so we can return exact lower and upper bounds. On
+        // 32-bit targets, `0x1_0000_0000` doesn't fit into `usize`, so we
+        // only return an lower bound of `usize::MAX` and don't return an
+        // upper bound.
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            Step::steps_between(&page(0), &page(0x1000_0000_0000)),
+            (0x1_0000_0000, Some(0x1_0000_0000))
+        );
+        #[cfg(not(target_pointer_width = "64"))]
+        assert_eq!(
+            Step::steps_between(&page(0), &page(0x1000_0000_0000)),
+            (usize::MAX, None)
+        );
     }
 
     #[test]
     #[cfg(feature = "step_trait")]
-    fn page_step_forward_57() {
-        let test_cases = [
-            (0, 0, Some(0)),
-            (0, 1, Some(0x1000)),
-            // The 48-bit gap is not a gap for 57-bit addresses.
-            (0x7fff_ffff_f000, 1, Some(0x8000_0000_0000)),
-            (0x00ff_ffff_ffff_f000, 1, Some(0xff00_0000_0000_0000)),
-            (0xff00_0000_0000_0000, 1, Some(0xff00_0000_0000_1000)),
-            (0xffff_ffff_ffff_f000, 1, None),
-            #[cfg(target_pointer_width = "64")]
-            (
-                0x00ff_ffff_ffff_f000,
-                0x1_2345_6789,
-                Some(0xff00_1234_5678_8000),
-            ),
-            #[cfg(target_pointer_width = "64")]
-            (
-                0x00ff_ffff_ffff_f000,
-                0x1000_0000_0000,
-                Some(0xffff_ffff_ffff_f000),
-            ),
-            #[cfg(target_pointer_width = "64")]
-            (0x00ff_ffff_ffff_f000, 0x1000_0000_0001, None),
-        ];
-        for (start, count, result) in test_cases {
-            let start =
-                Page::<Size4KiB, Width57>::from_start_address(VirtAddr57::new(start)).unwrap();
-            let result = result.map(|result| {
-                Page::<Size4KiB, Width57>::from_start_address(VirtAddr57::new(result)).unwrap()
-            });
-            assert_eq!(Step::forward_checked(start, count), result);
-        }
+    fn page_step_around_gap() {
+        check_page_step_around_gap::<Width48>();
+        check_page_step_around_gap::<Width57>();
     }
 
     #[test]
     #[cfg(feature = "step_trait")]
-    fn page_step_backwards() {
-        let test_cases = [
-            (0, 0, Some(0)),
-            (0, 1, None),
-            (0x1000, 1, Some(0)),
-            (0xffff_8000_0000_0000, 1, Some(0x7fff_ffff_f000)),
-            (0xffff_8000_0000_1000, 1, Some(0xffff_8000_0000_0000)),
-            #[cfg(target_pointer_width = "64")]
-            (0xffff_9234_5678_8000, 0x1_2345_6789, Some(0x7fff_ffff_f000)),
-            #[cfg(target_pointer_width = "64")]
-            (0xffff_8000_0000_0000, 0x8_0000_0000, Some(0)),
-            #[cfg(target_pointer_width = "64")]
-            (0xffff_8000_0000_0000, 0x7_ffff_ff01, Some(0xff000)),
-            #[cfg(target_pointer_width = "64")]
-            (0xffff_8000_0000_0000, 0x8_0000_0001, None),
-            // Make sure that we handle `steps * PAGE_SIZE > u32::MAX`
-            // correctly on 32-bit targets.
-            (0x1_0000_0000, 0x10_0000, Some(0)),
-        ];
-        for (start, count, result) in test_cases {
-            let start = Page::<Size4KiB>::from_start_address(VirtAddr::new(start)).unwrap();
-            let result = result
-                .map(|result| Page::<Size4KiB>::from_start_address(VirtAddr::new(result)).unwrap());
-            assert_eq!(Step::backward_checked(start, count), result);
-        }
-    }
+    fn page_gap_positions() {
+        // Make sure the relative checks above cover the right absolute pages.
+        let page48 = |addr| Page::<Size4KiB>::from_start_address(VirtAddr::new(addr)).unwrap();
+        let page57 =
+            |addr| Page::<Size4KiB, Width57>::from_start_address(VirtAddr57::new(addr)).unwrap();
+        assert_eq!(Page::<Size4KiB>::lower_half_end(), page48(0x7fff_ffff_f000));
+        assert_eq!(
+            Page::<Size4KiB>::upper_half_start(),
+            page48(0xffff_8000_0000_0000)
+        );
+        assert_eq!(
+            Page::<Size4KiB, Width57>::lower_half_end(),
+            page57(0x00ff_ffff_ffff_f000)
+        );
+        assert_eq!(
+            Page::<Size4KiB, Width57>::upper_half_start(),
+            page57(0xff00_0000_0000_0000)
+        );
 
-    #[test]
-    #[cfg(feature = "step_trait")]
-    fn page_step_backwards_57() {
-        let test_cases = [
-            (0, 0, Some(0)),
-            (0, 1, None),
-            (0x1000, 1, Some(0)),
-            // The 48-bit gap is not a gap for 57-bit addresses.
-            (0xffff_8000_0000_0000, 1, Some(0xffff_7fff_ffff_f000)),
-            (0xff00_0000_0000_0000, 1, Some(0x00ff_ffff_ffff_f000)),
-            (0xff00_0000_0000_1000, 1, Some(0xff00_0000_0000_0000)),
-            #[cfg(target_pointer_width = "64")]
-            (
-                0xff00_1234_5678_8000,
-                0x1_2345_6789,
-                Some(0x00ff_ffff_ffff_f000),
-            ),
-            #[cfg(target_pointer_width = "64")]
-            (0xff00_0000_0000_0000, 0x1000_0000_0000, Some(0)),
-            #[cfg(target_pointer_width = "64")]
-            (0xff00_0000_0000_0000, 0x1000_0000_0001, None),
-        ];
-        for (start, count, result) in test_cases {
-            let start =
-                Page::<Size4KiB, Width57>::from_start_address(VirtAddr57::new(start)).unwrap();
-            let result = result.map(|result| {
-                Page::<Size4KiB, Width57>::from_start_address(VirtAddr57::new(result)).unwrap()
-            });
-            assert_eq!(Step::backward_checked(start, count), result);
-        }
-    }
-
-    #[test]
-    #[cfg(feature = "step_trait")]
-    fn page_steps_between() {
-        let test_cases = [
-            (0, 0, 0, Some(0)),
-            (0, 0x1000, 1, Some(1)),
-            (0x1000, 0, 0, None),
-            (0x1000, 0x1000, 0, Some(0)),
-            (0x7fff_ffff_f000, 0xffff_8000_0000_0000, 1, Some(1)),
-            (0xffff_8000_0000_0000, 0x7fff_ffff_f000, 0, None),
-            (0xffff_8000_0000_0000, 0xffff_8000_0000_0000, 0, Some(0)),
-            (0xffff_8000_0000_0000, 0xffff_8000_0000_1000, 1, Some(1)),
-            (0xffff_8000_0000_1000, 0xffff_8000_0000_0000, 0, None),
-            (0xffff_8000_0000_1000, 0xffff_8000_0000_1000, 0, Some(0)),
-            // Make sure that we handle `steps * PAGE_SIZE > u32::MAX` correctly on 32-bit
-            // targets.
-            (
-                0x0000_0000_0000,
-                0x0001_0000_0000,
-                0x10_0000,
-                Some(0x10_0000),
-            ),
-            // The returned bounds are different when `steps` doesn't fit in
-            // into `usize`. On 64-bit targets, `0x1_0000_0000` fits into
-            // `usize`, so we can return exact lower and upper bounds. On
-            // 32-bit targets, `0x1_0000_0000` doesn't fit into `usize`, so we
-            // only return an lower bound of `usize::MAX` and don't return an
-            // upper bound.
-            #[cfg(target_pointer_width = "64")]
-            (
-                0x0000_0000_0000,
-                0x1000_0000_0000,
-                0x1_0000_0000,
-                Some(0x1_0000_0000),
-            ),
-            #[cfg(not(target_pointer_width = "64"))]
-            (0x0000_0000_0000, 0x1000_0000_0000, usize::MAX, None),
-        ];
-        for (start, end, lower, upper) in test_cases {
-            let start = Page::<Size4KiB>::from_start_address(VirtAddr::new(start)).unwrap();
-            let end = Page::from_start_address(VirtAddr::new(end)).unwrap();
-            assert_eq!(Step::steps_between(&start, &end), (lower, upper));
-        }
-    }
-
-    #[test]
-    #[cfg(feature = "step_trait")]
-    fn page_steps_between_57() {
-        let test_cases = [
-            (0, 0, 0, Some(0)),
-            (0, 0x1000, 1, Some(1)),
-            (0x1000, 0, 0, None),
-            (0x00ff_ffff_ffff_f000, 0xff00_0000_0000_0000, 1, Some(1)),
-            (0xff00_0000_0000_0000, 0x00ff_ffff_ffff_f000, 0, None),
-            (0xff00_0000_0000_0000, 0xff00_0000_0000_1000, 1, Some(1)),
-            // The 48-bit gap is not a gap for 57-bit addresses, but the 57-bit gap
-            // between the two pages is skipped.
-            #[cfg(target_pointer_width = "64")]
-            (
-                0x7fff_ffff_f000,
-                0xffff_8000_0000_0000,
-                0x1ff0_0000_0001,
-                Some(0x1ff0_0000_0001),
-            ),
-        ];
-        for (start, end, lower, upper) in test_cases {
-            let start =
-                Page::<Size4KiB, Width57>::from_start_address(VirtAddr57::new(start)).unwrap();
-            let end = Page::from_start_address(VirtAddr57::new(end)).unwrap();
-            assert_eq!(Step::steps_between(&start, &end), (lower, upper));
-        }
+        // The 48-bit gap is not a gap for 57-bit pages.
+        assert_eq!(
+            Step::forward_checked(page57(0x7fff_ffff_f000), 1),
+            Some(page57(0x8000_0000_0000))
+        );
+        assert_eq!(
+            Step::backward_checked(page57(0xffff_8000_0000_0000), 1),
+            Some(page57(0xffff_7fff_ffff_f000))
+        );
     }
 
     #[test]
