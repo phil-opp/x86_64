@@ -1,9 +1,11 @@
 //! Abstractions for default-sized and huge virtual memory pages.
 
+use crate::addr::{
+    FiveLevelPaging, FourLevelPaging, PagingMode, VirtAddrGeneric, VirtAddrNotValid,
+};
 use crate::sealed::Sealed;
-use crate::structures::paging::page_table::PageTableLevel;
 use crate::structures::paging::PageTableIndex;
-use crate::VirtAddr;
+use crate::structures::paging::page_table::PageTableLevel;
 use core::convert::TryFrom;
 use core::fmt;
 #[cfg(feature = "step_trait")]
@@ -63,14 +65,22 @@ impl PageSize for Size1GiB {
 impl Sealed for super::Size1GiB {}
 
 /// A virtual memory page.
+///
+/// The `M` parameter specifies the [paging mode](PagingMode) that the page belongs to:
+/// [`FourLevelPaging`] (the default) for pages in a 48-bit address space or
+/// [`FiveLevelPaging`] for pages in a 57-bit address space.
+///
+/// # Representation
+///
+/// This struct has the same representation as a [`u64`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(C)]
-pub struct Page<S: PageSize = Size4KiB> {
-    start_address: VirtAddr,
+#[repr(transparent)]
+pub struct Page<S: PageSize = Size4KiB, M: PagingMode = FourLevelPaging> {
+    start_address: VirtAddrGeneric<M>,
     size: PhantomData<S>,
 }
 
-impl<S: PageSize> Page<S> {
+impl<S: PageSize, M: PagingMode> Page<S, M> {
     /// The page size in bytes.
     pub const SIZE: u64 = S::SIZE;
 
@@ -78,8 +88,9 @@ impl<S: PageSize> Page<S> {
     ///
     /// Returns an error if the address is not correctly aligned (i.e. is not a valid page start).
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn from_start_address(address: VirtAddr) -> Result<Self, AddressNotAligned> {
+    pub const fn from_start_address(
+        address: VirtAddrGeneric<M>,
+    ) -> Result<Self, AddressNotAligned> {
         if !address.is_aligned_u64(S::SIZE) {
             return Err(AddressNotAligned);
         }
@@ -92,8 +103,7 @@ impl<S: PageSize> Page<S> {
     ///
     /// The address must be correctly aligned.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub unsafe fn from_start_address_unchecked(start_address: VirtAddr) -> Self {
+    pub const unsafe fn from_start_address_unchecked(start_address: VirtAddrGeneric<M>) -> Self {
         Page {
             start_address,
             size: PhantomData,
@@ -102,8 +112,7 @@ impl<S: PageSize> Page<S> {
 
     /// Returns the page that contains the given virtual address.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn containing_address(address: VirtAddr) -> Self {
+    pub const fn containing_address(address: VirtAddrGeneric<M>) -> Self {
         Page {
             start_address: address.align_down_u64(S::SIZE),
             size: PhantomData,
@@ -112,56 +121,58 @@ impl<S: PageSize> Page<S> {
 
     /// Returns the start address of the page.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn start_address(self) -> VirtAddr {
+    pub const fn start_address(self) -> VirtAddrGeneric<M> {
         self.start_address
     }
 
     /// Returns the size the page (4KB, 2MB or 1GB).
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn size(self) -> u64 {
+    pub const fn size(self) -> u64 {
         S::SIZE
+    }
+
+    /// Returns the level 5 page table index of this page.
+    ///
+    /// This index is only used by 5-level paging. For a 48-bit page, this index is
+    /// either `0` (lower half) or `511` (upper half).
+    #[inline]
+    pub const fn p5_index(self) -> PageTableIndex {
+        self.start_address().p5_index()
     }
 
     /// Returns the level 4 page table index of this page.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn p4_index(self) -> PageTableIndex {
+    pub const fn p4_index(self) -> PageTableIndex {
         self.start_address().p4_index()
     }
 
     /// Returns the level 3 page table index of this page.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn p3_index(self) -> PageTableIndex {
+    pub const fn p3_index(self) -> PageTableIndex {
         self.start_address().p3_index()
     }
 
     /// Returns the table index of this page at the specified level.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn page_table_index(self, level: PageTableLevel) -> PageTableIndex {
+    pub const fn page_table_index(self, level: PageTableLevel) -> PageTableIndex {
         self.start_address().page_table_index(level)
     }
 
     /// Returns a range of pages, exclusive `end`.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn range(start: Self, end: Self) -> PageRange<S> {
+    pub const fn range(start: Self, end: Self) -> PageRange<S, M> {
         PageRange { start, end }
     }
 
     /// Returns a range of pages, inclusive `end`.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn range_inclusive(start: Self, end: Self) -> PageRangeInclusive<S> {
+    pub const fn range_inclusive(start: Self, end: Self) -> PageRangeInclusive<S, M> {
         PageRangeInclusive { start, end }
     }
 
     // FIXME: Move this into the `Step` impl, once `Step` is stabilized.
     pub(crate) fn steps_between_u64(start: &Self, end: &Self) -> Option<u64> {
-        VirtAddr::steps_between_u64(&start.start_address(), &end.start_address())
+        VirtAddrGeneric::steps_between_u64(&start.start_address(), &end.start_address())
             .map(|steps| steps / S::SIZE)
     }
 
@@ -180,19 +191,34 @@ impl<S: PageSize> Page<S> {
     #[cfg(any(feature = "instructions", feature = "step_trait"))]
     pub(crate) fn forward_checked_impl(start: Self, count: usize) -> Option<Self> {
         let count = u64::try_from(count).ok()?.checked_mul(S::SIZE)?;
-        let start_address = VirtAddr::forward_checked_u64(start.start_address, count)?;
+        let start_address = VirtAddrGeneric::forward_checked_u64(start.start_address, count)?;
         Some(Self {
             start_address,
             size: PhantomData,
         })
     }
+
+    /// Returns the last page in the lower half of the address space.
+    ///
+    /// This is the last page before the non-canonical “gap” in the address space.
+    #[inline]
+    pub(crate) const fn lower_half_end() -> Self {
+        Self::containing_address(VirtAddrGeneric::lower_half_end())
+    }
+
+    /// Returns the first page in the upper half of the address space.
+    ///
+    /// This is the first page after the non-canonical “gap” in the address space.
+    #[inline]
+    pub(crate) const fn upper_half_start() -> Self {
+        Self::containing_address(VirtAddrGeneric::upper_half_start())
+    }
 }
 
-impl<S: NotGiantPageSize> Page<S> {
+impl<S: NotGiantPageSize, M: PagingMode> Page<S, M> {
     /// Returns the level 2 page table index of this page.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn p2_index(self) -> PageTableIndex {
+    pub const fn p2_index(self) -> PageTableIndex {
         self.start_address().p2_index()
     }
 }
@@ -200,23 +226,21 @@ impl<S: NotGiantPageSize> Page<S> {
 impl Page<Size1GiB> {
     /// Returns the 1GiB memory page with the specified page table indices.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn from_page_table_indices_1gib(
+    pub const fn from_page_table_indices_1gib(
         p4_index: PageTableIndex,
         p3_index: PageTableIndex,
     ) -> Self {
         let mut addr = 0;
         addr |= p4_index.into_u64() << 39;
         addr |= p3_index.into_u64() << 30;
-        Page::containing_address(VirtAddr::new_truncate(addr))
+        Page::containing_address(VirtAddrGeneric::new_truncate(addr))
     }
 }
 
 impl Page<Size2MiB> {
     /// Returns the 2MiB memory page with the specified page table indices.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn from_page_table_indices_2mib(
+    pub const fn from_page_table_indices_2mib(
         p4_index: PageTableIndex,
         p3_index: PageTableIndex,
         p2_index: PageTableIndex,
@@ -225,15 +249,14 @@ impl Page<Size2MiB> {
         addr |= p4_index.into_u64() << 39;
         addr |= p3_index.into_u64() << 30;
         addr |= p2_index.into_u64() << 21;
-        Page::containing_address(VirtAddr::new_truncate(addr))
+        Page::containing_address(VirtAddrGeneric::new_truncate(addr))
     }
 }
 
 impl Page<Size4KiB> {
     /// Returns the 4KiB memory page with the specified page table indices.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn from_page_table_indices(
+    pub const fn from_page_table_indices(
         p4_index: PageTableIndex,
         p3_index: PageTableIndex,
         p2_index: PageTableIndex,
@@ -244,9 +267,11 @@ impl Page<Size4KiB> {
         addr |= p3_index.into_u64() << 30;
         addr |= p2_index.into_u64() << 21;
         addr |= p1_index.into_u64() << 12;
-        Page::containing_address(VirtAddr::new_truncate(addr))
+        Page::containing_address(VirtAddrGeneric::new_truncate(addr))
     }
+}
 
+impl<M: PagingMode> Page<Size4KiB, M> {
     /// Returns the level 1 page table index of this page.
     #[inline]
     pub const fn p1_index(self) -> PageTableIndex {
@@ -254,7 +279,36 @@ impl Page<Size4KiB> {
     }
 }
 
-impl<S: PageSize> fmt::Debug for Page<S> {
+impl<S: PageSize> From<Page<S, FourLevelPaging>> for Page<S, FiveLevelPaging> {
+    /// Widens the address of a page in a 48-bit address space to 57 bits.
+    ///
+    /// This conversion never fails and doesn't change the start address of the page.
+    #[inline]
+    fn from(page: Page<S, FourLevelPaging>) -> Self {
+        Page {
+            start_address: page.start_address.into(),
+            size: PhantomData,
+        }
+    }
+}
+
+impl<S: PageSize> TryFrom<Page<S, FiveLevelPaging>> for Page<S, FourLevelPaging> {
+    type Error = VirtAddrNotValid;
+
+    /// Narrows the address of a page in a 57-bit address space to 48 bits.
+    ///
+    /// This conversion fails if the start address of the page is not a valid 48-bit
+    /// canonical address.
+    #[inline]
+    fn try_from(page: Page<S, FiveLevelPaging>) -> Result<Self, Self::Error> {
+        Ok(Page {
+            start_address: page.start_address.try_into()?,
+            size: PhantomData,
+        })
+    }
+}
+
+impl<S: PageSize, M: PagingMode> fmt::Debug for Page<S, M> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_fmt(format_args!(
             "Page[{}]({:#x})",
@@ -264,7 +318,7 @@ impl<S: PageSize> fmt::Debug for Page<S> {
     }
 }
 
-impl<S: PageSize> Add<u64> for Page<S> {
+impl<S: PageSize, M: PagingMode> Add<u64> for Page<S, M> {
     type Output = Self;
     #[inline]
     fn add(self, rhs: u64) -> Self::Output {
@@ -272,14 +326,14 @@ impl<S: PageSize> Add<u64> for Page<S> {
     }
 }
 
-impl<S: PageSize> AddAssign<u64> for Page<S> {
+impl<S: PageSize, M: PagingMode> AddAssign<u64> for Page<S, M> {
     #[inline]
     fn add_assign(&mut self, rhs: u64) {
         *self = *self + rhs;
     }
 }
 
-impl<S: PageSize> Sub<u64> for Page<S> {
+impl<S: PageSize, M: PagingMode> Sub<u64> for Page<S, M> {
     type Output = Self;
     #[inline]
     fn sub(self, rhs: u64) -> Self::Output {
@@ -287,14 +341,14 @@ impl<S: PageSize> Sub<u64> for Page<S> {
     }
 }
 
-impl<S: PageSize> SubAssign<u64> for Page<S> {
+impl<S: PageSize, M: PagingMode> SubAssign<u64> for Page<S, M> {
     #[inline]
     fn sub_assign(&mut self, rhs: u64) {
         *self = *self - rhs;
     }
 }
 
-impl<S: PageSize> Sub<Self> for Page<S> {
+impl<S: PageSize, M: PagingMode> Sub<Self> for Page<S, M> {
     type Output = u64;
     #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
@@ -303,7 +357,7 @@ impl<S: PageSize> Sub<Self> for Page<S> {
 }
 
 #[cfg(feature = "step_trait")]
-impl<S: PageSize> Step for Page<S> {
+impl<S: PageSize, M: PagingMode> Step for Page<S, M> {
     fn steps_between(start: &Self, end: &Self) -> (usize, Option<usize>) {
         Self::steps_between_impl(start, end)
     }
@@ -316,7 +370,7 @@ impl<S: PageSize> Step for Page<S> {
         use core::convert::TryFrom;
 
         let count = u64::try_from(count).ok()?.checked_mul(S::SIZE)?;
-        let start_address = VirtAddr::backward_checked_u64(start.start_address, count)?;
+        let start_address = VirtAddrGeneric::backward_checked_u64(start.start_address, count)?;
         Some(Self {
             start_address,
             size: PhantomData,
@@ -339,16 +393,15 @@ impl<S: PageSize> Step for Page<S> {
 }
 
 /// A range of pages with exclusive upper bound.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(C)]
-pub struct PageRange<S: PageSize = Size4KiB> {
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct PageRange<S: PageSize = Size4KiB, M: PagingMode = FourLevelPaging> {
     /// The start of the range, inclusive.
-    pub start: Page<S>,
+    pub start: Page<S, M>,
     /// The end of the range, exclusive.
-    pub end: Page<S>,
+    pub end: Page<S, M>,
 }
 
-impl<S: PageSize> PageRange<S> {
+impl<S: PageSize, M: PagingMode> PageRange<S, M> {
     /// Returns whether this range contains no pages.
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -372,8 +425,8 @@ impl<S: PageSize> PageRange<S> {
     }
 }
 
-impl<S: PageSize> Iterator for PageRange<S> {
-    type Item = Page<S>;
+impl<S: PageSize, M: PagingMode> Iterator for PageRange<S, M> {
+    type Item = Page<S, M>;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -405,7 +458,7 @@ impl<S: PageSize> Iterator for PageRange<S> {
         }
 
         // Figure out how many steps there are until the address range gap.
-        let second_half_start = Page::<S>::containing_address(VirtAddr::new(0xffff_8000_0000_0000));
+        let second_half_start = Page::<S, M>::upper_half_start();
         let steps_until_gap = Page::steps_between_u64(&self.start, &second_half_start)
             .filter(|steps| *steps <= n && *steps > 0);
         if let Some(steps_until_gap) = steps_until_gap {
@@ -428,7 +481,7 @@ impl<S: PageSize> Iterator for PageRange<S> {
     }
 }
 
-impl<S: PageSize> DoubleEndedIterator for PageRange<S> {
+impl<S: PageSize, M: PagingMode> DoubleEndedIterator for PageRange<S, M> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.start < self.end {
@@ -458,7 +511,7 @@ impl<S: PageSize> DoubleEndedIterator for PageRange<S> {
         }
 
         // Figure out how many steps there are until the address range gap.
-        let first_half_end = Page::<S>::containing_address(VirtAddr::new(0x7fff_ffff_f000));
+        let first_half_end = Page::<S, M>::lower_half_end();
         let steps_until_gap = Page::steps_between_u64(&first_half_end, &self.end)
             .filter(|steps| *steps <= n && *steps > 0);
         if let Some(steps_until_gap) = steps_until_gap {
@@ -474,10 +527,10 @@ impl<S: PageSize> DoubleEndedIterator for PageRange<S> {
     }
 }
 
-impl PageRange<Size2MiB> {
+impl<M: PagingMode> PageRange<Size2MiB, M> {
     /// Converts the range of 2MiB pages to a range of 4KiB pages.
     #[inline]
-    pub fn as_4kib_page_range(self) -> PageRange<Size4KiB> {
+    pub fn as_4kib_page_range(self) -> PageRange<Size4KiB, M> {
         PageRange {
             start: Page::containing_address(self.start.start_address()),
             end: Page::containing_address(self.end.start_address()),
@@ -485,7 +538,7 @@ impl PageRange<Size2MiB> {
     }
 }
 
-impl<S: PageSize> fmt::Debug for PageRange<S> {
+impl<S: PageSize, M: PagingMode> fmt::Debug for PageRange<S, M> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("PageRange")
             .field("start", &self.start)
@@ -495,16 +548,15 @@ impl<S: PageSize> fmt::Debug for PageRange<S> {
 }
 
 /// A range of pages with inclusive upper bound.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(C)]
-pub struct PageRangeInclusive<S: PageSize = Size4KiB> {
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct PageRangeInclusive<S: PageSize = Size4KiB, M: PagingMode = FourLevelPaging> {
     /// The start of the range, inclusive.
-    pub start: Page<S>,
+    pub start: Page<S, M>,
     /// The end of the range, inclusive.
-    pub end: Page<S>,
+    pub end: Page<S, M>,
 }
 
-impl<S: PageSize> PageRangeInclusive<S> {
+impl<S: PageSize, M: PagingMode> PageRangeInclusive<S, M> {
     /// Returns whether this range contains no pages.
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -528,8 +580,8 @@ impl<S: PageSize> PageRangeInclusive<S> {
     }
 }
 
-impl<S: PageSize> Iterator for PageRangeInclusive<S> {
-    type Item = Page<S>;
+impl<S: PageSize, M: PagingMode> Iterator for PageRangeInclusive<S, M> {
+    type Item = Page<S, M>;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -539,7 +591,7 @@ impl<S: PageSize> Iterator for PageRangeInclusive<S> {
             // If the end of the inclusive range is the maximum page possible for size S,
             // incrementing start until it is greater than the end will cause an integer overflow.
             // So instead, in that case we decrement end rather than incrementing start.
-            let max_page_addr = VirtAddr::new(u64::MAX) - (S::SIZE - 1);
+            let max_page_addr = VirtAddrGeneric::<M>::new(u64::MAX) - (S::SIZE - 1);
             if self.start.start_address() < max_page_addr {
                 self.start += 1;
             } else {
@@ -570,7 +622,7 @@ impl<S: PageSize> Iterator for PageRangeInclusive<S> {
         }
 
         // Figure out how many steps there are until the address range gap.
-        let second_half_start = Page::<S>::containing_address(VirtAddr::new(0xffff_8000_0000_0000));
+        let second_half_start = Page::<S, M>::upper_half_start();
         let steps_until_gap = Page::steps_between_u64(&self.start, &second_half_start)
             .filter(|steps| *steps <= n && *steps > 0);
         if let Some(steps_until_gap) = steps_until_gap {
@@ -593,7 +645,7 @@ impl<S: PageSize> Iterator for PageRangeInclusive<S> {
     }
 }
 
-impl<S: PageSize> DoubleEndedIterator for PageRangeInclusive<S> {
+impl<S: PageSize, M: PagingMode> DoubleEndedIterator for PageRangeInclusive<S, M> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.start <= self.end {
@@ -632,7 +684,7 @@ impl<S: PageSize> DoubleEndedIterator for PageRangeInclusive<S> {
         }
 
         // Figure out how many steps there are until the address range gap.
-        let first_half_end = Page::<S>::containing_address(VirtAddr::new(0x7fff_ffff_f000));
+        let first_half_end = Page::<S, M>::lower_half_end();
         let steps_until_gap = Page::steps_between_u64(&first_half_end, &self.end)
             .filter(|steps| *steps <= n && *steps > 0);
         if let Some(steps_until_gap) = steps_until_gap {
@@ -648,7 +700,7 @@ impl<S: PageSize> DoubleEndedIterator for PageRangeInclusive<S> {
     }
 }
 
-impl<S: PageSize> fmt::Debug for PageRangeInclusive<S> {
+impl<S: PageSize, M: PagingMode> fmt::Debug for PageRangeInclusive<S, M> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("PageRangeInclusive")
             .field("start", &self.start)
@@ -658,7 +710,7 @@ impl<S: PageSize> fmt::Debug for PageRangeInclusive<S> {
 }
 
 #[cfg(kani)]
-impl<S: PageSize> kani::Arbitrary for Page<S> {
+impl<S: PageSize, M: PagingMode> kani::Arbitrary for Page<S, M> {
     fn any() -> Self {
         Self::containing_address(kani::any())
     }
@@ -677,6 +729,7 @@ impl fmt::Display for AddressNotAligned {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{VirtAddr, VirtAddr48, VirtAddr57};
 
     fn test_is_hash<T: core::hash::Hash>() {}
 
@@ -685,15 +738,34 @@ mod tests {
         test_is_hash::<Page<Size4KiB>>();
         test_is_hash::<Page<Size2MiB>>();
         test_is_hash::<Page<Size1GiB>>();
+        test_is_hash::<Page<Size4KiB, FiveLevelPaging>>();
     }
 
     #[test]
-    pub fn test_page_ranges() {
+    pub fn test_page_default_paging_mode() {
+        // `Page<S>` defaults to 48-bit addresses.
+        let page: Page = Page::containing_address(VirtAddr::new(0x1000));
+        let _: Page<Size4KiB, FourLevelPaging> = page;
+        let _: VirtAddr48 = page.start_address();
+    }
+
+    #[test]
+    pub fn test_page_paging_mode_conversions() {
+        let page48: Page<Size2MiB> = Page::containing_address(VirtAddr::new(0xffff_8000_dead_beaf));
+        let page57 = Page::<Size2MiB, FiveLevelPaging>::from(page48);
+        assert_eq!(page57.start_address().as_u64(), 0xffff_8000_dea0_0000);
+        assert_eq!(Page::<Size2MiB>::try_from(page57).unwrap(), page48);
+
+        let only57: Page<Size4KiB, FiveLevelPaging> =
+            Page::containing_address(VirtAddr57::new(0x0000_8000_0000_1000));
+        assert!(Page::<Size4KiB>::try_from(only57).is_err());
+    }
+
+    fn check_page_ranges<M: PagingMode>(start_addr: VirtAddrGeneric<M>) {
         let page_size = Size4KiB::SIZE;
         let number = 1000;
 
-        let start_addr = VirtAddr::new(0xdead_beaf);
-        let start: Page = Page::containing_address(start_addr);
+        let start: Page<Size4KiB, M> = Page::containing_address(start_addr);
         let end = start + number;
 
         let mut range = Page::range(start, end);
@@ -713,6 +785,13 @@ mod tests {
             );
         }
         assert_eq!(range_inclusive.next(), None);
+    }
+
+    #[test]
+    pub fn test_page_ranges() {
+        check_page_ranges(VirtAddr::new(0xdead_beaf));
+        // This address is in the 48-bit gap, but valid for 57-bit addresses.
+        check_page_ranges(VirtAddr57::new(0x0000_8000_dead_beaf));
     }
 
     #[test]
@@ -742,6 +821,18 @@ mod tests {
         let start = VirtAddr::new(start);
         let end = VirtAddr::new(end);
         let start = Page::<Size4KiB>::from_start_address(start).unwrap();
+        let end = Page::from_start_address(end).unwrap();
+        Page::range(start, end).next();
+    }
+
+    #[test]
+    #[should_panic = "attempt to add resulted in non-canonical virtual address: VirtAddrNotValid(0x100000000000000)"]
+    fn test_page_range_next_jumping_gap_panics_57() {
+        let start = 0x00ff_ffff_ffff_f000;
+        let end = 0xff00_0000_0000_0000;
+        let start = VirtAddr57::new(start);
+        let end = VirtAddr57::new(end);
+        let start = Page::<Size4KiB, FiveLevelPaging>::from_start_address(start).unwrap();
         let end = Page::from_start_address(end).unwrap();
         Page::range(start, end).next();
     }
@@ -823,110 +914,164 @@ mod tests {
         assert_eq!(range_inclusive.len(), 51);
     }
 
-    #[test]
+    /// Checks the `Step` implementation of pages around the non-canonical gap of the
+    /// address space of paging mode `M`.
+    ///
+    /// All pages are expressed relative to the gap, so the same checks apply to both paging
+    /// modes.
     #[cfg(feature = "step_trait")]
-    fn page_step_forward() {
-        let test_cases = [
-            (0, 0, Some(0)),
-            (0, 1, Some(0x1000)),
-            (0x1000, 1, Some(0x2000)),
-            (0x7fff_ffff_f000, 1, Some(0xffff_8000_0000_0000)),
-            (0xffff_8000_0000_0000, 1, Some(0xffff_8000_0000_1000)),
-            (0xffff_ffff_ffff_f000, 1, None),
-            #[cfg(target_pointer_width = "64")]
-            (0x7fff_ffff_f000, 0x1_2345_6789, Some(0xffff_9234_5678_8000)),
-            #[cfg(target_pointer_width = "64")]
-            (0x7fff_ffff_f000, 0x8_0000_0000, Some(0xffff_ffff_ffff_f000)),
-            #[cfg(target_pointer_width = "64")]
-            (0x7fff_fff0_0000, 0x8_0000_00ff, Some(0xffff_ffff_ffff_f000)),
-            #[cfg(target_pointer_width = "64")]
-            (0x7fff_fff0_0000, 0x8_0000_0100, None),
-            #[cfg(target_pointer_width = "64")]
-            (0x7fff_ffff_f000, 0x8_0000_0001, None),
-            // Make sure that we handle `steps * PAGE_SIZE > u32::MAX`
-            // correctly on 32-bit targets.
-            (0, 0x10_0000, Some(0x1_0000_0000)),
-        ];
-        for (start, count, result) in test_cases {
-            let start = Page::<Size4KiB>::from_start_address(VirtAddr::new(start)).unwrap();
-            let result = result
-                .map(|result| Page::<Size4KiB>::from_start_address(VirtAddr::new(result)).unwrap());
-            assert_eq!(Step::forward_checked(start, count), result);
+    fn check_page_step_around_gap<M: PagingMode>() {
+        let page = |addr: u64| {
+            Page::<Size4KiB, M>::from_start_address(VirtAddrGeneric::new(addr)).unwrap()
+        };
+        let lower_end = Page::<Size4KiB, M>::lower_half_end();
+        let upper_start = Page::<Size4KiB, M>::upper_half_start();
+        let last = Page::<Size4KiB, M>::containing_address(VirtAddrGeneric::new(u64::MAX));
+        // The number of pages in each half of the address space.
+        #[cfg(target_pointer_width = "64")]
+        let half = (1u64 << (M::VIRT_ADDR_BITS - 1)) / Size4KiB::SIZE;
+
+        // forward
+        assert_eq!(Step::forward_checked(page(0), 0), Some(page(0)));
+        assert_eq!(Step::forward_checked(page(0), 1), Some(page(0x1000)));
+        assert_eq!(Step::forward_checked(page(0x1000), 1), Some(page(0x2000)));
+        assert_eq!(Step::forward_checked(lower_end, 1), Some(upper_start));
+        assert_eq!(Step::forward_checked(upper_start, 1), Some(upper_start + 1));
+        assert_eq!(Step::forward_checked(last, 1), None);
+        // Make sure that we handle `steps * PAGE_SIZE > u32::MAX` correctly on 32-bit targets.
+        assert_eq!(
+            Step::forward_checked(page(0), 0x10_0000),
+            Some(page(0x1_0000_0000))
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            let half = half as usize;
+            assert_eq!(
+                Step::forward_checked(lower_end, 0x1_2345_6789),
+                Some(upper_start + 0x1_2345_6788)
+            );
+            assert_eq!(Step::forward_checked(lower_end, half), Some(last));
+            assert_eq!(
+                Step::forward_checked(lower_end - 0xff, half + 0xff),
+                Some(last)
+            );
+            assert_eq!(Step::forward_checked(lower_end - 0xff, half + 0x100), None);
+            assert_eq!(Step::forward_checked(lower_end, half + 1), None);
         }
+
+        // backward
+        assert_eq!(Step::backward_checked(page(0), 0), Some(page(0)));
+        assert_eq!(Step::backward_checked(page(0), 1), None);
+        assert_eq!(Step::backward_checked(page(0x1000), 1), Some(page(0)));
+        assert_eq!(Step::backward_checked(upper_start, 1), Some(lower_end));
+        assert_eq!(
+            Step::backward_checked(upper_start + 1, 1),
+            Some(upper_start)
+        );
+        // Make sure that we handle `steps * PAGE_SIZE > u32::MAX` correctly on 32-bit targets.
+        assert_eq!(
+            Step::backward_checked(page(0x1_0000_0000), 0x10_0000),
+            Some(page(0))
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            let half = half as usize;
+            assert_eq!(
+                Step::backward_checked(upper_start + 0x1_2345_6788, 0x1_2345_6789),
+                Some(lower_end)
+            );
+            assert_eq!(Step::backward_checked(upper_start, half), Some(page(0)));
+            assert_eq!(
+                Step::backward_checked(upper_start, half - 0xff),
+                Some(page(0xff000))
+            );
+            assert_eq!(Step::backward_checked(upper_start, half + 1), None);
+        }
+
+        // steps_between
+        assert_eq!(Step::steps_between(&page(0), &page(0)), (0, Some(0)));
+        assert_eq!(Step::steps_between(&page(0), &page(0x1000)), (1, Some(1)));
+        assert_eq!(Step::steps_between(&page(0x1000), &page(0)), (0, None));
+        assert_eq!(
+            Step::steps_between(&page(0x1000), &page(0x1000)),
+            (0, Some(0))
+        );
+        assert_eq!(Step::steps_between(&lower_end, &upper_start), (1, Some(1)));
+        assert_eq!(Step::steps_between(&upper_start, &lower_end), (0, None));
+        assert_eq!(
+            Step::steps_between(&upper_start, &upper_start),
+            (0, Some(0))
+        );
+        assert_eq!(
+            Step::steps_between(&upper_start, &(upper_start + 1)),
+            (1, Some(1))
+        );
+        assert_eq!(
+            Step::steps_between(&(upper_start + 1), &upper_start),
+            (0, None)
+        );
+        // Make sure that we handle `steps * PAGE_SIZE > u32::MAX` correctly on 32-bit
+        // targets.
+        assert_eq!(
+            Step::steps_between(&page(0), &page(0x1_0000_0000)),
+            (0x10_0000, Some(0x10_0000))
+        );
+        // The returned bounds are different when `steps` doesn't fit in
+        // into `usize`. On 64-bit targets, `0x1_0000_0000` fits into
+        // `usize`, so we can return exact lower and upper bounds. On
+        // 32-bit targets, `0x1_0000_0000` doesn't fit into `usize`, so we
+        // only return an lower bound of `usize::MAX` and don't return an
+        // upper bound.
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            Step::steps_between(&page(0), &page(0x1000_0000_0000)),
+            (0x1_0000_0000, Some(0x1_0000_0000))
+        );
+        #[cfg(not(target_pointer_width = "64"))]
+        assert_eq!(
+            Step::steps_between(&page(0), &page(0x1000_0000_0000)),
+            (usize::MAX, None)
+        );
     }
 
     #[test]
     #[cfg(feature = "step_trait")]
-    fn page_step_backwards() {
-        let test_cases = [
-            (0, 0, Some(0)),
-            (0, 1, None),
-            (0x1000, 1, Some(0)),
-            (0xffff_8000_0000_0000, 1, Some(0x7fff_ffff_f000)),
-            (0xffff_8000_0000_1000, 1, Some(0xffff_8000_0000_0000)),
-            #[cfg(target_pointer_width = "64")]
-            (0xffff_9234_5678_8000, 0x1_2345_6789, Some(0x7fff_ffff_f000)),
-            #[cfg(target_pointer_width = "64")]
-            (0xffff_8000_0000_0000, 0x8_0000_0000, Some(0)),
-            #[cfg(target_pointer_width = "64")]
-            (0xffff_8000_0000_0000, 0x7_ffff_ff01, Some(0xff000)),
-            #[cfg(target_pointer_width = "64")]
-            (0xffff_8000_0000_0000, 0x8_0000_0001, None),
-            // Make sure that we handle `steps * PAGE_SIZE > u32::MAX`
-            // correctly on 32-bit targets.
-            (0x1_0000_0000, 0x10_0000, Some(0)),
-        ];
-        for (start, count, result) in test_cases {
-            let start = Page::<Size4KiB>::from_start_address(VirtAddr::new(start)).unwrap();
-            let result = result
-                .map(|result| Page::<Size4KiB>::from_start_address(VirtAddr::new(result)).unwrap());
-            assert_eq!(Step::backward_checked(start, count), result);
-        }
+    fn page_step_around_gap() {
+        check_page_step_around_gap::<FourLevelPaging>();
+        check_page_step_around_gap::<FiveLevelPaging>();
     }
 
     #[test]
     #[cfg(feature = "step_trait")]
-    fn page_steps_between() {
-        let test_cases = [
-            (0, 0, 0, Some(0)),
-            (0, 0x1000, 1, Some(1)),
-            (0x1000, 0, 0, None),
-            (0x1000, 0x1000, 0, Some(0)),
-            (0x7fff_ffff_f000, 0xffff_8000_0000_0000, 1, Some(1)),
-            (0xffff_8000_0000_0000, 0x7fff_ffff_f000, 0, None),
-            (0xffff_8000_0000_0000, 0xffff_8000_0000_0000, 0, Some(0)),
-            (0xffff_8000_0000_0000, 0xffff_8000_0000_1000, 1, Some(1)),
-            (0xffff_8000_0000_1000, 0xffff_8000_0000_0000, 0, None),
-            (0xffff_8000_0000_1000, 0xffff_8000_0000_1000, 0, Some(0)),
-            // Make sure that we handle `steps * PAGE_SIZE > u32::MAX` correctly on 32-bit
-            // targets.
-            (
-                0x0000_0000_0000,
-                0x0001_0000_0000,
-                0x10_0000,
-                Some(0x10_0000),
-            ),
-            // The returned bounds are different when `steps` doesn't fit in
-            // into `usize`. On 64-bit targets, `0x1_0000_0000` fits into
-            // `usize`, so we can return exact lower and upper bounds. On
-            // 32-bit targets, `0x1_0000_0000` doesn't fit into `usize`, so we
-            // only return an lower bound of `usize::MAX` and don't return an
-            // upper bound.
-            #[cfg(target_pointer_width = "64")]
-            (
-                0x0000_0000_0000,
-                0x1000_0000_0000,
-                0x1_0000_0000,
-                Some(0x1_0000_0000),
-            ),
-            #[cfg(not(target_pointer_width = "64"))]
-            (0x0000_0000_0000, 0x1000_0000_0000, usize::MAX, None),
-        ];
-        for (start, end, lower, upper) in test_cases {
-            let start = Page::<Size4KiB>::from_start_address(VirtAddr::new(start)).unwrap();
-            let end = Page::from_start_address(VirtAddr::new(end)).unwrap();
-            assert_eq!(Step::steps_between(&start, &end), (lower, upper));
-        }
+    fn page_gap_positions() {
+        // Make sure the relative checks above cover the right absolute pages.
+        let page48 = |addr| Page::<Size4KiB>::from_start_address(VirtAddr::new(addr)).unwrap();
+        let page57 = |addr| {
+            Page::<Size4KiB, FiveLevelPaging>::from_start_address(VirtAddr57::new(addr)).unwrap()
+        };
+        assert_eq!(Page::<Size4KiB>::lower_half_end(), page48(0x7fff_ffff_f000));
+        assert_eq!(
+            Page::<Size4KiB>::upper_half_start(),
+            page48(0xffff_8000_0000_0000)
+        );
+        assert_eq!(
+            Page::<Size4KiB, FiveLevelPaging>::lower_half_end(),
+            page57(0x00ff_ffff_ffff_f000)
+        );
+        assert_eq!(
+            Page::<Size4KiB, FiveLevelPaging>::upper_half_start(),
+            page57(0xff00_0000_0000_0000)
+        );
+
+        // The 48-bit gap is not a gap for 57-bit pages.
+        assert_eq!(
+            Step::forward_checked(page57(0x7fff_ffff_f000), 1),
+            Some(page57(0x8000_0000_0000))
+        );
+        assert_eq!(
+            Step::backward_checked(page57(0xffff_8000_0000_0000), 1),
+            Some(page57(0xffff_7fff_ffff_f000))
+        );
     }
 
     #[test]

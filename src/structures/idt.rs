@@ -21,7 +21,7 @@
 //! These types are defined for the compatibility with the Nightly Rust build.
 
 use crate::registers::rflags::RFlags;
-use crate::{PrivilegeLevel, VirtAddr};
+use crate::{PrivilegeLevel, RawVirtAddr};
 use bit_field::BitField;
 use bitflags::bitflags;
 use core::convert::TryFrom;
@@ -293,8 +293,7 @@ pub struct InterruptDescriptorTable {
     /// The virtual (linear) address that caused the `#PF` is stored in the `CR2` register.
     /// The saved instruction pointer points to the instruction that caused the `#PF`.
     ///
-    /// The page-fault error code is described by the
-    /// [`PageFaultErrorCode`] struct.
+    /// The page-fault error code is described by the [`PageFaultErrorCode`] struct.
     ///
     /// The vector number of the `#PF` exception is 14.
     pub page_fault: Entry<PageFaultHandlerFunc>,
@@ -449,8 +448,7 @@ pub struct InterruptDescriptorTable {
 impl InterruptDescriptorTable {
     /// Creates a new IDT filled with non-present entries.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
-    pub fn new() -> InterruptDescriptorTable {
+    pub const fn new() -> InterruptDescriptorTable {
         InterruptDescriptorTable {
             divide_error: Entry::missing(),
             debug: Entry::missing(),
@@ -521,7 +519,7 @@ impl InterruptDescriptorTable {
     fn pointer(&self) -> crate::structures::DescriptorTablePointer {
         use core::mem::size_of;
         crate::structures::DescriptorTablePointer {
-            base: VirtAddr::new(self as *const _ as u64),
+            base: RawVirtAddr::new(self as *const _ as u64),
             limit: (size_of::<Self>() - 1) as u16,
         }
     }
@@ -822,13 +820,14 @@ impl<F> Entry<F> {
     /// # Safety
     ///
     /// The caller must ensure that `addr` is the address of a valid interrupt handler function,
-    /// and the signature of such a function is correct for the entry type.
+    /// and the signature of such a function is correct for the entry type. In particular, the
+    /// address must be canonical for the active paging mode.
     #[cfg(all(feature = "instructions", target_arch = "x86_64"))]
     #[inline]
-    pub unsafe fn set_handler_addr(&mut self, addr: VirtAddr) -> &mut EntryOptions {
-        use crate::instructions::segmentation::{Segment, CS};
+    pub unsafe fn set_handler_addr(&mut self, addr: impl Into<RawVirtAddr>) -> &mut EntryOptions {
+        use crate::instructions::segmentation::{CS, Segment};
 
-        let addr = addr.as_u64();
+        let addr = addr.into().as_u64();
         self.pointer_low = addr as u16;
         self.pointer_middle = (addr >> 16) as u16;
         self.pointer_high = (addr >> 32) as u32;
@@ -841,14 +840,14 @@ impl<F> Entry<F> {
     }
 
     /// Returns the virtual address of this IDT entry's handler function.
+    ///
+    /// The address is returned as it is stored in the entry, without a canonicality check.
     #[inline]
-    pub fn handler_addr(&self) -> VirtAddr {
+    pub fn handler_addr(&self) -> RawVirtAddr {
         let addr = self.pointer_low as u64
             | ((self.pointer_middle as u64) << 16)
             | ((self.pointer_high as u64) << 32);
-        // addr is a valid VirtAddr, as the pointer members are either all zero,
-        // or have been set by set_handler_addr (which takes a VirtAddr).
-        VirtAddr::new_truncate(addr)
+        RawVirtAddr::new(addr)
     }
 }
 
@@ -879,7 +878,7 @@ impl<F: HandlerFuncType> Entry<F> {
 /// Implementors have to ensure that `to_virt_addr` returns a valid address.
 pub unsafe trait HandlerFuncType {
     /// Get the virtual address of the handler function.
-    fn to_virt_addr(self) -> VirtAddr;
+    fn to_virt_addr(self) -> RawVirtAddr;
 }
 
 macro_rules! impl_handler_func_type {
@@ -890,14 +889,14 @@ macro_rules! impl_handler_func_type {
         ))]
         unsafe impl HandlerFuncType for $f {
             #[inline]
-            fn to_virt_addr(self) -> VirtAddr {
+            fn to_virt_addr(self) -> RawVirtAddr {
                 // Casting a function pointer to u64 is fine, if the pointer
                 // width doesn't exceed 64 bits.
                 #[cfg_attr(
                     any(target_pointer_width = "32", target_pointer_width = "64"),
                     allow(clippy::fn_to_numeric_cast)
                 )]
-                VirtAddr::new(self as u64)
+                RawVirtAddr::new(self as u64)
             }
         }
     };
@@ -1019,12 +1018,15 @@ pub struct InterruptStackFrame(InterruptStackFrameValue);
 
 impl InterruptStackFrame {
     /// Creates a new interrupt stack frame with the given values.
+    ///
+    /// The addresses can be given as [`VirtAddr48`](crate::VirtAddr48),
+    /// [`VirtAddr57`](crate::VirtAddr57), or [`RawVirtAddr`].
     #[inline]
     pub fn new(
-        instruction_pointer: VirtAddr,
+        instruction_pointer: impl Into<RawVirtAddr>,
         code_segment: SegmentSelector,
         cpu_flags: RFlags,
-        stack_pointer: VirtAddr,
+        stack_pointer: impl Into<RawVirtAddr>,
         stack_segment: SegmentSelector,
     ) -> Self {
         Self(InterruptStackFrameValue::new(
@@ -1081,14 +1083,22 @@ pub struct InterruptStackFrameValue {
     /// following the last executed instruction. However, for some exceptions (e.g., page faults),
     /// this value points to the faulting instruction, so that the instruction is restarted on
     /// return. See the documentation of the [`InterruptDescriptorTable`] fields for more details.
-    pub instruction_pointer: VirtAddr,
+    ///
+    /// The CPU pushes this value, so it is stored as a [`RawVirtAddr`]. Use
+    /// [`RawVirtAddr::try_into_48`] or [`RawVirtAddr::try_into_57`] to convert it into a
+    /// checked address type, depending on the paging mode of the kernel.
+    pub instruction_pointer: RawVirtAddr,
     /// The code segment selector at the time of the interrupt.
     pub code_segment: SegmentSelector,
     _reserved1: [u8; 6],
     /// The flags register before the interrupt handler was invoked.
     pub cpu_flags: RFlags,
     /// The stack pointer at the time of the interrupt.
-    pub stack_pointer: VirtAddr,
+    ///
+    /// The CPU pushes this value, so it is stored as a [`RawVirtAddr`]. Use
+    /// [`RawVirtAddr::try_into_48`] or [`RawVirtAddr::try_into_57`] to convert it into a
+    /// checked address type, depending on the paging mode of the kernel.
+    pub stack_pointer: RawVirtAddr,
     /// The stack segment descriptor at the time of the interrupt (often zero in 64-bit mode).
     pub stack_segment: SegmentSelector,
     _reserved2: [u8; 6],
@@ -1096,20 +1106,23 @@ pub struct InterruptStackFrameValue {
 
 impl InterruptStackFrameValue {
     /// Creates a new interrupt stack frame with the given values.
+    ///
+    /// The addresses can be given as [`VirtAddr48`](crate::VirtAddr48),
+    /// [`VirtAddr57`](crate::VirtAddr57), or [`RawVirtAddr`].
     #[inline]
     pub fn new(
-        instruction_pointer: VirtAddr,
+        instruction_pointer: impl Into<RawVirtAddr>,
         code_segment: SegmentSelector,
         cpu_flags: RFlags,
-        stack_pointer: VirtAddr,
+        stack_pointer: impl Into<RawVirtAddr>,
         stack_segment: SegmentSelector,
     ) -> Self {
         Self {
-            instruction_pointer,
+            instruction_pointer: instruction_pointer.into(),
             code_segment,
             _reserved1: Default::default(),
             cpu_flags,
-            stack_pointer,
+            stack_pointer: stack_pointer.into(),
             stack_segment,
             _reserved2: Default::default(),
         }
@@ -1746,10 +1759,10 @@ mod test {
     #[test]
     fn isr_frame_manipulation() {
         let mut frame = InterruptStackFrame(InterruptStackFrameValue {
-            instruction_pointer: VirtAddr::new(0x1000),
+            instruction_pointer: RawVirtAddr::new(0x1000),
             code_segment: SegmentSelector(0),
             cpu_flags: RFlags::empty(),
-            stack_pointer: VirtAddr::new(0x2000),
+            stack_pointer: RawVirtAddr::new(0x2000),
             stack_segment: SegmentSelector(0),
             _reserved1: Default::default(),
             _reserved2: Default::default(),

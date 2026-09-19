@@ -1,5 +1,30 @@
 # Unreleased
 
+## Breaking changes
+
+- [add `Mapper::clear` to clear any page table entry regardless of the present flag](https://github.com/rust-osdev/x86_64/pull/484)
+- [`Mapper::unmap` now also returns the flags of the page ](https://github.com/rust-osdev/x86_64/pull/484)
+- [make `OffsetPageTable` a type alias](https://github.com/rust-osdev/x86_64/pull/576)
+  - To migrate, replace `OffsetPageTable::new` with `OffsetPageTable::from_phys_offset` or `MappedPageTable::from_phys_offset`.
+  - `OffsetPageTable`'s `PageTableFrameMapping` implementation is now public as `PhysOffset`.
+- [make range types `!Copy`](https://github.com/rust-osdev/x86_64/pull/581)
+  - To migrate, use `.clone()` if necessary.
+- [make page types `repr(transparent)` and range types `repr(Rust)`](https://github.com/rust-osdev/x86_64/pull/584)
+- [add `MappedPageTable::display`](https://github.com/rust-osdev/x86_64/pull/574)
+  - The mappings of a `MappedPageTable` can now be displayed.
+- [Increase the Minimum Supported Rust Version to 1.98](https://github.com/rust-osdev/x86_64/pull/604)
+- [make memory encryption bit an upper limit for physical address bits](https://github.com/rust-osdev/x86_64/pull/603)
+- add support for 57-bit virtual addresses (5-level paging)
+  - The new sealed `PagingMode` trait with its `FourLevelPaging` and `FiveLevelPaging` implementations describes the two paging modes of the CPU (`LEVELS` and `VIRT_ADDR_BITS`).
+  - `VirtAddr` is now an alias for the new `VirtAddr48` type, which is `VirtAddrGeneric<FourLevelPaging>`. The new `VirtAddr57` type (`VirtAddrGeneric<FiveLevelPaging>`) represents 57-bit canonical addresses for 5-level paging. `VirtAddr48` can be converted into `VirtAddr57` using `From`, the reverse conversion is available through `TryFrom`.
+  - Addresses that are written by the CPU are now represented by the new unchecked `RawVirtAddr` type, which converts to either checked type via `try_into_48`/`try_into_57` (or `TryFrom`) and from either checked type via `From`: `InterruptStackFrameValue::instruction_pointer`/`stack_pointer`, `DescriptorTablePointer::base`, `Entry::handler_addr`, `HandlerFuncType::to_virt_addr`, `Cr2::read` (which no longer returns a `Result`), `FsBase::read`, `GsBase::read`, `KernelGsBase::read`, `LStar::read`, `Segment64::read_base`, and `read_rip`.
+    - To migrate, call `.try_into_48()` (or `.try_into_57()`) on the returned value.
+  - Methods that write an address to the CPU accept addresses of both paging modes: `FsBase::write`, `GsBase::write`, `KernelGsBase::write`, `LStar::write`, and `Segment64::write_base` are generic over the paging mode, and `InterruptStackFrame::new`, `InterruptStackFrameValue::new`, and `Entry::set_handler_addr` accept `impl Into<RawVirtAddr>`.
+  - `UCet::read`/`SCet::read` return the legacy code page bitmap address as a `RawVirtAddr`; `UCet::write`/`SCet::write` accept a `Page` of either paging mode.
+  - Structures that hold addresses written by the kernel and only read by the CPU use `VirtAddr57`: `TaskStateSegment` and `InvPcidCommand::Address`. To migrate, convert 48-bit addresses with `.into()`.
+  - `Page`, `PageRange`, `PageRangeInclusive`, `MapperFlush`, `UnmappedFrame`, and the `Mapper`, `MapperAllSizes`, `Translate`, and `CleanUp` traits have a new paging mode parameter that defaults to `FourLevelPaging`. `Page<S, FiveLevelPaging>` represents a page in a 57-bit address space (5-level paging). The mapper implementations of this crate still only implement the traits for `FourLevelPaging`.
+  - `tlb::flush` accepts virtual addresses of both paging modes.
+
 # 0.15.5 – 2026-07-11
 
 This release is compatible with Rust nightlies starting with `nightly-2026-07-10` (this only applies when the `nightly` feature is used).

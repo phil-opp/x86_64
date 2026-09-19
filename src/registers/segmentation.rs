@@ -1,7 +1,8 @@
 //! Abstractions for segment registers.
 
 use super::model_specific::Msr;
-use crate::{PrivilegeLevel, VirtAddr};
+use crate::PrivilegeLevel;
+use crate::addr::{PagingMode, RawVirtAddr, VirtAddrGeneric};
 use bit_field::BitField;
 use core::fmt;
 // imports for intra doc links
@@ -42,10 +43,14 @@ pub trait Segment64: Segment {
     const BASE: Msr;
     /// Reads the segment base address
     ///
+    /// The address is canonical for the active paging mode. Use
+    /// [`RawVirtAddr::try_into_48`] or [`RawVirtAddr::try_into_57`] to convert it into a
+    /// checked address type.
+    ///
     /// ## Exceptions
     ///
     /// If [`CR4.FSGSBASE`][Cr4Flags::FSGSBASE] is not set, this instruction will throw a `#UD`.
-    fn read_base() -> VirtAddr;
+    fn read_base() -> RawVirtAddr;
     /// Writes the segment base address
     ///
     /// ## Exceptions
@@ -56,7 +61,7 @@ pub trait Segment64: Segment {
     ///
     /// The caller must ensure that this write operation has no unsafe side
     /// effects, as the segment base address might be in use.
-    unsafe fn write_base(base: VirtAddr);
+    unsafe fn write_base<M: PagingMode>(base: VirtAddrGeneric<M>);
 }
 
 /// Specifies which element to load into a segment from

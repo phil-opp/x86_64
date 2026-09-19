@@ -47,11 +47,16 @@ pub fn bochs_breakpoint() {
 
 /// Gets the current instruction pointer. Note that this is only approximate as it requires a few
 /// instructions to execute.
+///
+/// The address is canonical for the active paging mode. Use
+/// [`RawVirtAddr::try_into_48`](crate::RawVirtAddr::try_into_48) or
+/// [`RawVirtAddr::try_into_57`](crate::RawVirtAddr::try_into_57) to convert it into a checked
+/// address type.
 #[inline(always)]
-pub fn read_rip() -> crate::VirtAddr {
+pub fn read_rip() -> crate::RawVirtAddr {
     let rip: u64;
     unsafe {
         asm!("lea {}, [rip]", out(reg) rip, options(nostack, nomem, preserves_flags));
     }
-    crate::VirtAddr::new(rip)
+    crate::RawVirtAddr::new(rip)
 }

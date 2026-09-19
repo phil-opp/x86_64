@@ -2,35 +2,140 @@
 
 use core::convert::TryFrom;
 use core::fmt;
+use core::hash::Hash;
 #[cfg(feature = "step_trait")]
 use core::iter::Step;
+use core::marker::PhantomData;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 #[cfg(feature = "memory_encryption")]
 use core::sync::atomic::Ordering;
 
+use crate::sealed::Sealed;
 #[cfg(feature = "memory_encryption")]
-use crate::structures::mem_encrypt::ENC_BIT_MASK;
+use crate::structures::mem_encrypt::PHYSICAL_ADDRESS_MASK;
 use crate::structures::paging::page_table::PageTableLevel;
 use crate::structures::paging::{PageOffset, PageTableIndex};
 
-use bit_field::BitField;
 use dep_const_fn::const_fn;
 
-const ADDRESS_SPACE_SIZE: u64 = 0x1_0000_0000_0000;
+/// A paging mode of the CPU: 4-level or 5-level paging.
+///
+/// The paging mode determines the depth of the page table hierarchy and, with it, the
+/// number of valid bits in a virtual address. Virtual addresses are canonical if all bits
+/// above the most significant valid bit are copies of that bit.
+///
+/// - [`FourLevelPaging`]: four page table levels, the lower 48 bits of an address are valid.
+/// - [`FiveLevelPaging`]: five page table levels, the lower 57 bits of an address are valid.
+///
+/// Types that depend on the paging mode, such as [`VirtAddrGeneric`],
+/// [`Page`](crate::structures::paging::Page), or the
+/// [`Mapper`](crate::structures::paging::Mapper) trait, take the mode as a type parameter
+/// that defaults to [`FourLevelPaging`].
+///
+/// This trait is sealed and cannot be implemented outside this crate.
+pub trait PagingMode: Copy + Eq + PartialOrd + Ord + Hash + Sealed {
+    /// The number of page table levels.
+    const LEVELS: u8;
 
-/// A canonical 64-bit virtual memory address.
+    /// The number of valid bits in a virtual address.
+    const VIRT_ADDR_BITS: u32;
+
+    /// The name of the virtual address type of this paging mode, as used in `Debug`
+    /// output.
+    const TYPE_NAME: &'static str;
+}
+
+/// 4-level paging: four page table levels and 48-bit virtual addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FourLevelPaging {}
+
+/// 5-level paging: five page table levels and 57-bit virtual addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FiveLevelPaging {}
+
+impl PagingMode for FourLevelPaging {
+    const LEVELS: u8 = 4;
+    const VIRT_ADDR_BITS: u32 = 48;
+    const TYPE_NAME: &'static str = "VirtAddr";
+}
+
+impl Sealed for FourLevelPaging {}
+
+impl PagingMode for FiveLevelPaging {
+    const LEVELS: u8 = 5;
+    const VIRT_ADDR_BITS: u32 = 57;
+    const TYPE_NAME: &'static str = "VirtAddr57";
+}
+
+impl Sealed for FiveLevelPaging {}
+
+/// A canonical 64-bit virtual memory address for the given [paging mode](PagingMode).
 ///
 /// This is a wrapper type around an `u64`, so it is always 8 bytes, even when compiled
 /// on non 64-bit systems. The
 /// [`TryFrom`](https://doc.rust-lang.org/std/convert/trait.TryFrom.html) trait can be used for performing conversions
 /// between `u64` and `usize`.
 ///
-/// On `x86_64`, only the 48 lower bits of a virtual address can be used. The top 16 bits need
-/// to be copies of bit 47, i.e. the most significant bit. Addresses that fulfil this criterion
-/// are called “canonical”. This type guarantees that it always represents a canonical address.
+/// On `x86_64`, only the lower bits of a virtual address can be used. How many bits
+/// exactly depends on the paging mode: 48 bits with 4-level paging and 57 bits with
+/// 5-level paging. The remaining upper bits need to be copies of the most significant
+/// valid bit (bit 47 or bit 56, respectively). Addresses that fulfil this criterion are
+/// called “canonical”. This type guarantees that it always represents a canonical address
+/// for its paging mode `M`.
+///
+/// Most code should use the [`VirtAddr48`] and [`VirtAddr57`] type aliases instead of
+/// naming this type directly. [`VirtAddr`] is an alias for [`VirtAddr48`].
+///
+/// # Conversions
+///
+/// Every 48-bit canonical address is also a 57-bit canonical address, so a [`VirtAddr48`]
+/// can be converted into a [`VirtAddr57`] using [`From`]. The reverse conversion can
+/// fail and is available through [`TryFrom`].
+///
+/// # Representation
+///
+/// This struct has the same representation as a [`u64`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct VirtAddr(u64);
+pub struct VirtAddrGeneric<M: PagingMode>(u64, PhantomData<M>);
+
+/// A canonical 48-bit virtual memory address, as used with 4-level paging.
+///
+/// The top 16 bits need to be copies of bit 47. See [`VirtAddrGeneric`] for details.
+pub type VirtAddr48 = VirtAddrGeneric<FourLevelPaging>;
+
+/// A canonical 57-bit virtual memory address, as used with 5-level paging.
+///
+/// The top 7 bits need to be copies of bit 56. See [`VirtAddrGeneric`] for details.
+pub type VirtAddr57 = VirtAddrGeneric<FiveLevelPaging>;
+
+/// A canonical 48-bit virtual memory address.
+///
+/// This is an alias for [`VirtAddr48`]. Use [`VirtAddr57`] for 57-bit virtual addresses
+/// (5-level paging).
+pub type VirtAddr = VirtAddr48;
+
+/// A virtual memory address as read from or written to the CPU, without any canonicality
+/// guarantee.
+///
+/// This type is used at the boundary between this crate and the hardware, for values that
+/// the CPU writes and that this crate cannot verify: the instruction and stack pointer in an
+/// [`InterruptStackFrame`](crate::structures::idt::InterruptStackFrame), the contents of
+/// `CR2`, segment base registers, and similar. Whether such a value is a valid 48-bit or
+/// 57-bit address depends on the paging mode the CPU is running in, which only the kernel
+/// knows. Convert it to a checked address type with [`try_into_48`](Self::try_into_48),
+/// [`try_into_57`](Self::try_into_57), or [`TryFrom`]; both checked types convert into a
+/// `RawVirtAddr` using [`From`].
+///
+/// Arithmetic on this type is plain `u64` arithmetic that panics on overflow. It does not
+/// jump the non-canonical “gap” and does not keep the address canonical.
+///
+/// # Representation
+///
+/// This struct has the same representation as a [`u64`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct RawVirtAddr(u64);
 
 /// A 64-bit physical memory address.
 ///
@@ -41,16 +146,20 @@ pub struct VirtAddr(u64);
 ///
 /// On `x86_64`, only the 52 lower bits of a physical address can be used. The top 12 bits need
 /// to be zero. This type guarantees that it always represents a valid physical address.
+///
+/// # Representation
+///
+/// This struct has the same representation as a [`u64`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct PhysAddr(u64);
 
 /// A passed `u64` was not a valid virtual address.
 ///
-/// This means that bits 48 to 64 are not
-/// a valid sign extension and are not null either. So automatic sign extension would have
-/// overwritten possibly meaningful bits. This likely indicates a bug, for example an invalid
-/// address calculation.
+/// This means that the bits above the most significant valid bit (bit 47 for 48-bit
+/// addresses, bit 56 for 57-bit addresses) are not a valid sign extension and are not
+/// null either. So automatic sign extension would have overwritten possibly meaningful
+/// bits. This likely indicates a bug, for example an invalid address calculation.
 ///
 /// Contains the invalid address.
 pub struct VirtAddrNotValid(pub u64);
@@ -63,7 +172,18 @@ impl core::fmt::Debug for VirtAddrNotValid {
     }
 }
 
-impl VirtAddr {
+impl<M: PagingMode> VirtAddrGeneric<M> {
+    /// The number of valid bits in this virtual address type.
+    ///
+    /// This is 48 for [`VirtAddr48`] and 57 for [`VirtAddr57`].
+    pub const BITS: u32 = M::VIRT_ADDR_BITS;
+
+    /// The number of canonical addresses, i.e. `2^BITS`.
+    const ADDRESS_SPACE_SIZE: u64 = 1 << M::VIRT_ADDR_BITS;
+
+    /// The number of bits that must be a sign extension of the most significant valid bit.
+    const SIGN_EXTENSION_BITS: u32 = 64 - M::VIRT_ADDR_BITS;
+
     /// Creates a new canonical virtual address.
     ///
     /// The provided address should already be canonical. If you want to check
@@ -71,14 +191,17 @@ impl VirtAddr {
     ///
     /// ## Panics
     ///
-    /// This function panics if the bits in the range 48 to 64 are invalid
-    /// (i.e. are not a proper sign extension of bit 47).
+    /// This function panics if the bits above the most significant valid bit are invalid
+    /// (i.e. are not a proper sign extension of bit 47 for 48-bit addresses or of bit 56
+    /// for 57-bit addresses).
     #[inline]
-    pub const fn new(addr: u64) -> VirtAddr {
+    pub const fn new(addr: u64) -> Self {
         // TODO: Replace with .ok().expect(msg) when that works on stable.
         match Self::try_new(addr) {
             Ok(v) => v,
-            Err(_) => panic!("virtual address must be sign extended in bits 48 to 64"),
+            Err(_) => {
+                panic!("virtual address must be sign extended above its most significant valid bit")
+            }
         }
     }
 
@@ -86,10 +209,11 @@ impl VirtAddr {
     ///
     /// This function checks whether the given address is canonical
     /// and returns an error otherwise. An address is canonical
-    /// if bits 48 to 64 are a correct sign
-    /// extension (i.e. copies of bit 47).
+    /// if the bits above the most significant valid bit are a correct sign
+    /// extension (i.e. copies of bit 47 for 48-bit addresses or of bit 56 for 57-bit
+    /// addresses).
     #[inline]
-    pub const fn try_new(addr: u64) -> Result<VirtAddr, VirtAddrNotValid> {
+    pub const fn try_new(addr: u64) -> Result<Self, VirtAddrNotValid> {
         let v = Self::new_truncate(addr);
         if v.0 == addr {
             Ok(v)
@@ -98,32 +222,38 @@ impl VirtAddr {
         }
     }
 
-    /// Creates a new canonical virtual address, throwing out bits 48..64.
+    /// Creates a new canonical virtual address, throwing out the bits above the most
+    /// significant valid bit.
     ///
-    /// This function performs sign extension of bit 47 to make the address
-    /// canonical, overwriting bits 48 to 64. If you want to check whether an
-    /// address is canonical, use [`new`](Self::new) or [`try_new`](Self::try_new).
+    /// This function performs sign extension of bit 47 (for 48-bit addresses) or bit 56
+    /// (for 57-bit addresses) to make the address canonical, overwriting the bits above.
+    /// If you want to check whether an address is canonical, use [`new`](Self::new) or
+    /// [`try_new`](Self::try_new).
     #[inline]
-    pub const fn new_truncate(addr: u64) -> VirtAddr {
+    pub const fn new_truncate(addr: u64) -> Self {
         // By doing the right shift as a signed operation (on a i64), it will
         // sign extend the value, repeating the leftmost bit.
-        VirtAddr(((addr << 16) as i64 >> 16) as u64)
+        VirtAddrGeneric(
+            ((addr << Self::SIGN_EXTENSION_BITS) as i64 >> Self::SIGN_EXTENSION_BITS) as u64,
+            PhantomData,
+        )
     }
 
     /// Creates a new virtual address, without any checks.
     ///
     /// ## Safety
     ///
-    /// You must make sure bits 48..64 are equal to bit 47. This is not checked.
+    /// You must make sure that the address is canonical, i.e. that all bits above the
+    /// most significant valid bit are copies of that bit. This is not checked.
     #[inline]
-    pub const unsafe fn new_unsafe(addr: u64) -> VirtAddr {
-        VirtAddr(addr)
+    pub const unsafe fn new_unsafe(addr: u64) -> Self {
+        VirtAddrGeneric(addr, PhantomData)
     }
 
     /// Creates a virtual address that points to `0`.
     #[inline]
-    pub const fn zero() -> VirtAddr {
-        VirtAddr(0)
+    pub const fn zero() -> Self {
+        VirtAddrGeneric(0, PhantomData)
     }
 
     /// Converts the address to an `u64`.
@@ -172,7 +302,7 @@ impl VirtAddr {
     where
         U: Into<u64>,
     {
-        VirtAddr::new_truncate(align_up(self.0, align.into()))
+        Self::new_truncate(align_up(self.0, align.into()))
     }
 
     /// Aligns the virtual address downwards to the given alignment.
@@ -191,7 +321,7 @@ impl VirtAddr {
     /// See the `align_down` function for more information.
     #[inline]
     pub(crate) const fn align_down_u64(self, align: u64) -> Self {
-        VirtAddr::new_truncate(align_down(self.0, align))
+        Self::new_truncate(align_down(self.0, align))
     }
 
     /// Checks whether the virtual address has the demanded alignment.
@@ -239,10 +369,37 @@ impl VirtAddr {
         PageTableIndex::new_truncate((self.0 >> 12 >> 9 >> 9 >> 9) as u16)
     }
 
+    /// Returns the 9-bit level 5 page table index.
+    ///
+    /// This index is only used by 5-level paging. For a 48-bit address, this index is
+    /// either `0` (lower half) or `511` (upper half).
+    #[inline]
+    pub const fn p5_index(self) -> PageTableIndex {
+        PageTableIndex::new_truncate((self.0 >> 12 >> 9 >> 9 >> 9 >> 9) as u16)
+    }
+
     /// Returns the 9-bit level page table index.
     #[inline]
     pub const fn page_table_index(self, level: PageTableLevel) -> PageTableIndex {
         PageTableIndex::new_truncate((self.0 >> 12 >> ((level as u8 - 1) * 9)) as u16)
+    }
+
+    /// Returns the first address of the upper half of the canonical address space.
+    ///
+    /// This is the first canonical address after the non-canonical “gap” in the address
+    /// space.
+    #[inline]
+    pub(crate) const fn upper_half_start() -> Self {
+        Self::new_truncate(1 << (M::VIRT_ADDR_BITS - 1))
+    }
+
+    /// Returns the last address of the lower half of the canonical address space.
+    ///
+    /// This is the last canonical address before the non-canonical “gap” in the address
+    /// space.
+    #[inline]
+    pub(crate) const fn lower_half_end() -> Self {
+        Self::new_truncate((1 << (M::VIRT_ADDR_BITS - 1)) - 1)
     }
 
     // FIXME: Move this into the `Step` impl, once `Step` is stabilized.
@@ -256,16 +413,34 @@ impl VirtAddr {
         }
     }
 
+    /// Returns the position of this address in the sequence of canonical addresses.
+    ///
+    /// Canonical addresses form a contiguous sequence of `2^BITS` values once the sign
+    /// extension is removed: the lower half maps to `0..2^(BITS-1)` and the upper half to
+    /// `2^(BITS-1)..2^BITS`. This is the inverse of [`from_index`](Self::from_index).
+    #[inline]
+    const fn index(self) -> u64 {
+        self.0 & (Self::ADDRESS_SPACE_SIZE - 1)
+    }
+
+    /// Returns the canonical address at the given position in the sequence of canonical
+    /// addresses, or `None` if the position is out of range.
+    ///
+    /// This is the inverse of [`index`](Self::index).
+    #[inline]
+    const fn from_index(index: u64) -> Option<Self> {
+        if index < Self::ADDRESS_SPACE_SIZE {
+            Some(Self::new_truncate(index))
+        } else {
+            None
+        }
+    }
+
     /// An implementation of steps_between that returns u64. Note that this
     /// function always returns the exact bound, so it doesn't need to return a
     /// lower and upper bound like steps_between does.
     pub(crate) fn steps_between_u64(start: &Self, end: &Self) -> Option<u64> {
-        let mut steps = end.0.checked_sub(start.0)?;
-
-        // Mask away extra bits that appear while jumping the gap.
-        steps &= 0xffff_ffff_ffff;
-
-        Some(steps)
+        end.index().checked_sub(start.index())
     }
 
     // FIXME: Move this into the `Step` impl, once `Step` is stabilized.
@@ -275,99 +450,67 @@ impl VirtAddr {
     }
 
     /// An implementation of forward_checked that takes u64 instead of usize.
+    ///
+    /// Unlike [`Add`], this jumps the non-canonical gap of the address space.
     #[inline]
     pub(crate) fn forward_checked_u64(start: Self, count: u64) -> Option<Self> {
-        if count > ADDRESS_SPACE_SIZE {
-            return None;
-        }
-
-        let mut addr = start.0.checked_add(count)?;
-
-        match addr.get_bits(47..) {
-            0x1 => {
-                // Jump the gap by sign extending the 47th bit.
-                addr.set_bits(47.., 0x1ffff);
-            }
-            0x2 => {
-                // Address overflow
-                return None;
-            }
-            _ => {}
-        }
-
-        Some(unsafe { Self::new_unsafe(addr) })
+        Self::from_index(start.index().checked_add(count)?)
     }
 
     /// An implementation of backward_checked that takes u64 instead of usize.
+    ///
+    /// Unlike [`Sub`], this jumps the non-canonical gap of the address space.
     #[cfg(feature = "step_trait")]
     #[inline]
     pub(crate) fn backward_checked_u64(start: Self, count: u64) -> Option<Self> {
-        if count > ADDRESS_SPACE_SIZE {
-            return None;
-        }
-
-        let mut addr = start.0.checked_sub(count)?;
-
-        match addr.get_bits(47..) {
-            0x1fffe => {
-                // Jump the gap by sign extending the 47th bit.
-                addr.set_bits(47.., 0);
-            }
-            0x1fffd => {
-                // Address underflow
-                return None;
-            }
-            _ => {}
-        }
-
-        Some(unsafe { Self::new_unsafe(addr) })
+        Self::from_index(start.index().checked_sub(count)?)
     }
 }
 
-impl fmt::Debug for VirtAddr {
+impl<M: PagingMode> fmt::Debug for VirtAddrGeneric<M> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("VirtAddr")
+        f.debug_tuple(M::TYPE_NAME)
             .field(&format_args!("{:#x}", self.0))
             .finish()
     }
 }
 
-impl fmt::Binary for VirtAddr {
+impl<M: PagingMode> fmt::Binary for VirtAddrGeneric<M> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Binary::fmt(&self.0, f)
     }
 }
 
-impl fmt::LowerHex for VirtAddr {
+impl<M: PagingMode> fmt::LowerHex for VirtAddrGeneric<M> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::LowerHex::fmt(&self.0, f)
     }
 }
 
-impl fmt::Octal for VirtAddr {
+impl<M: PagingMode> fmt::Octal for VirtAddrGeneric<M> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Octal::fmt(&self.0, f)
     }
 }
 
-impl fmt::UpperHex for VirtAddr {
+impl<M: PagingMode> fmt::UpperHex for VirtAddrGeneric<M> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::UpperHex::fmt(&self.0, f)
     }
 }
 
-impl fmt::Pointer for VirtAddr {
+impl<M: PagingMode> fmt::Pointer for VirtAddrGeneric<M> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Pointer::fmt(&(self.0 as *const ()), f)
     }
 }
 
-impl Add<u64> for VirtAddr {
+impl<M: PagingMode> Add<u64> for VirtAddrGeneric<M> {
     type Output = Self;
 
     #[cfg_attr(not(feature = "step_trait"), allow(rustdoc::broken_intra_doc_links))]
@@ -383,7 +526,7 @@ impl Add<u64> for VirtAddr {
     /// canonical address.
     #[inline]
     fn add(self, rhs: u64) -> Self::Output {
-        VirtAddr::try_new(
+        Self::try_new(
             self.0
                 .checked_add(rhs)
                 .expect("attempt to add with overflow"),
@@ -392,7 +535,7 @@ impl Add<u64> for VirtAddr {
     }
 }
 
-impl AddAssign<u64> for VirtAddr {
+impl<M: PagingMode> AddAssign<u64> for VirtAddrGeneric<M> {
     #[cfg_attr(not(feature = "step_trait"), allow(rustdoc::broken_intra_doc_links))]
     /// Add an offset to a virtual address.
     ///
@@ -410,7 +553,7 @@ impl AddAssign<u64> for VirtAddr {
     }
 }
 
-impl Sub<u64> for VirtAddr {
+impl<M: PagingMode> Sub<u64> for VirtAddrGeneric<M> {
     type Output = Self;
 
     #[cfg_attr(not(feature = "step_trait"), allow(rustdoc::broken_intra_doc_links))]
@@ -426,7 +569,7 @@ impl Sub<u64> for VirtAddr {
     /// canonical address.
     #[inline]
     fn sub(self, rhs: u64) -> Self::Output {
-        VirtAddr::try_new(
+        Self::try_new(
             self.0
                 .checked_sub(rhs)
                 .expect("attempt to subtract with overflow"),
@@ -435,7 +578,7 @@ impl Sub<u64> for VirtAddr {
     }
 }
 
-impl SubAssign<u64> for VirtAddr {
+impl<M: PagingMode> SubAssign<u64> for VirtAddrGeneric<M> {
     #[cfg_attr(not(feature = "step_trait"), allow(rustdoc::broken_intra_doc_links))]
     /// Subtract an offset from a virtual address.
     ///
@@ -453,7 +596,7 @@ impl SubAssign<u64> for VirtAddr {
     }
 }
 
-impl Sub<VirtAddr> for VirtAddr {
+impl<M: PagingMode> Sub<VirtAddrGeneric<M>> for VirtAddrGeneric<M> {
     type Output = u64;
 
     /// Returns the difference between two addresses.
@@ -462,15 +605,246 @@ impl Sub<VirtAddr> for VirtAddr {
     ///
     /// This function will panic on overflow.
     #[inline]
-    fn sub(self, rhs: VirtAddr) -> Self::Output {
+    fn sub(self, rhs: VirtAddrGeneric<M>) -> Self::Output {
         self.as_u64()
             .checked_sub(rhs.as_u64())
             .expect("attempt to subtract with overflow")
     }
 }
 
+impl From<VirtAddr48> for VirtAddr57 {
+    /// Widens a 48-bit virtual address to a 57-bit virtual address.
+    ///
+    /// Every 48-bit canonical address is also a 57-bit canonical address, so this
+    /// conversion never fails and doesn't change the address value.
+    #[inline]
+    fn from(addr: VirtAddr48) -> Self {
+        // SAFETY: A correct sign extension of bit 47 is also a correct sign extension
+        // of bit 56, so the address value is also a valid 57-bit address.
+        unsafe { Self::new_unsafe(addr.as_u64()) }
+    }
+}
+
+impl TryFrom<VirtAddr57> for VirtAddr48 {
+    type Error = VirtAddrNotValid;
+
+    /// Narrows a 57-bit virtual address to a 48-bit virtual address.
+    ///
+    /// This conversion fails if the address is not a valid 48-bit canonical address,
+    /// i.e. if bits 48 to 64 are not a correct sign extension of bit 47.
+    #[inline]
+    fn try_from(addr: VirtAddr57) -> Result<Self, Self::Error> {
+        Self::try_new(addr.as_u64())
+    }
+}
+
+impl RawVirtAddr {
+    /// Creates a new raw virtual address from the given value.
+    ///
+    /// No checks are performed.
+    #[inline]
+    pub const fn new(addr: u64) -> Self {
+        RawVirtAddr(addr)
+    }
+
+    /// Creates a raw virtual address that points to `0`.
+    #[inline]
+    pub const fn zero() -> Self {
+        RawVirtAddr(0)
+    }
+
+    /// Converts the address to an `u64`.
+    #[inline]
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    /// Creates a raw virtual address from the given pointer.
+    #[cfg(target_pointer_width = "64")]
+    #[inline]
+    pub fn from_ptr<T: ?Sized>(ptr: *const T) -> Self {
+        Self::new(ptr as *const () as u64)
+    }
+
+    /// Converts the address to a raw pointer.
+    #[cfg(target_pointer_width = "64")]
+    #[inline]
+    pub const fn as_ptr<T>(self) -> *const T {
+        self.as_u64() as *const T
+    }
+
+    /// Converts the address to a mutable raw pointer.
+    #[cfg(target_pointer_width = "64")]
+    #[inline]
+    pub const fn as_mut_ptr<T>(self) -> *mut T {
+        self.as_ptr::<T>() as *mut T
+    }
+
+    /// Convenience method for checking if a virtual address is null.
+    #[inline]
+    pub const fn is_null(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Tries to convert the address into a canonical address for the given
+    /// [paging mode](PagingMode).
+    ///
+    /// Fails if the address is not canonical for that paging mode.
+    #[inline]
+    pub const fn try_into_mode<M: PagingMode>(
+        self,
+    ) -> Result<VirtAddrGeneric<M>, VirtAddrNotValid> {
+        VirtAddrGeneric::try_new(self.0)
+    }
+
+    /// Tries to convert the address into a canonical 48-bit address.
+    ///
+    /// Fails if bits 48 to 64 are not a correct sign extension of bit 47. This is the
+    /// conversion to use in kernels that run with 4-level paging.
+    #[inline]
+    pub const fn try_into_48(self) -> Result<VirtAddr48, VirtAddrNotValid> {
+        self.try_into_mode()
+    }
+
+    /// Tries to convert the address into a canonical 57-bit address.
+    ///
+    /// Fails if bits 57 to 64 are not a correct sign extension of bit 56. This is the
+    /// conversion to use in kernels that run with 5-level paging.
+    #[inline]
+    pub const fn try_into_57(self) -> Result<VirtAddr57, VirtAddrNotValid> {
+        self.try_into_mode()
+    }
+}
+
+impl<M: PagingMode> From<VirtAddrGeneric<M>> for RawVirtAddr {
+    /// Discards the canonicality guarantee of a checked virtual address.
+    #[inline]
+    fn from(addr: VirtAddrGeneric<M>) -> Self {
+        RawVirtAddr(addr.as_u64())
+    }
+}
+
+impl<M: PagingMode> TryFrom<RawVirtAddr> for VirtAddrGeneric<M> {
+    type Error = VirtAddrNotValid;
+
+    /// Checks that the raw address is canonical for the paging mode `M`.
+    #[inline]
+    fn try_from(addr: RawVirtAddr) -> Result<Self, Self::Error> {
+        addr.try_into_mode()
+    }
+}
+
+impl fmt::Debug for RawVirtAddr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("RawVirtAddr")
+            .field(&format_args!("{:#x}", self.0))
+            .finish()
+    }
+}
+
+impl fmt::Binary for RawVirtAddr {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Binary::fmt(&self.0, f)
+    }
+}
+
+impl fmt::LowerHex for RawVirtAddr {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Octal for RawVirtAddr {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Octal::fmt(&self.0, f)
+    }
+}
+
+impl fmt::UpperHex for RawVirtAddr {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::UpperHex::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Pointer for RawVirtAddr {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Pointer::fmt(&(self.0 as *const ()), f)
+    }
+}
+
+impl Add<u64> for RawVirtAddr {
+    type Output = Self;
+
+    /// Adds an offset to the address using plain integer arithmetic.
+    ///
+    /// # Panics
+    ///
+    /// This function panics on overflow.
+    #[inline]
+    fn add(self, rhs: u64) -> Self::Output {
+        RawVirtAddr(
+            self.0
+                .checked_add(rhs)
+                .expect("attempt to add with overflow"),
+        )
+    }
+}
+
+impl AddAssign<u64> for RawVirtAddr {
+    #[inline]
+    fn add_assign(&mut self, rhs: u64) {
+        *self = *self + rhs;
+    }
+}
+
+impl Sub<u64> for RawVirtAddr {
+    type Output = Self;
+
+    /// Subtracts an offset from the address using plain integer arithmetic.
+    ///
+    /// # Panics
+    ///
+    /// This function panics on overflow.
+    #[inline]
+    fn sub(self, rhs: u64) -> Self::Output {
+        RawVirtAddr(
+            self.0
+                .checked_sub(rhs)
+                .expect("attempt to subtract with overflow"),
+        )
+    }
+}
+
+impl SubAssign<u64> for RawVirtAddr {
+    #[inline]
+    fn sub_assign(&mut self, rhs: u64) {
+        *self = *self - rhs;
+    }
+}
+
+impl Sub<RawVirtAddr> for RawVirtAddr {
+    type Output = u64;
+
+    /// Returns the difference between two addresses.
+    ///
+    /// # Panics
+    ///
+    /// This function panics on overflow.
+    #[inline]
+    fn sub(self, rhs: RawVirtAddr) -> Self::Output {
+        self.0
+            .checked_sub(rhs.0)
+            .expect("attempt to subtract with overflow")
+    }
+}
+
 #[cfg(feature = "step_trait")]
-impl Step for VirtAddr {
+impl<M: PagingMode> Step for VirtAddrGeneric<M> {
     #[inline]
     fn steps_between(start: &Self, end: &Self) -> (usize, Option<usize>) {
         Self::steps_between_impl(start, end)
@@ -504,7 +878,7 @@ impl Step for VirtAddr {
 }
 
 #[cfg(kani)]
-impl kani::Arbitrary for VirtAddr {
+impl<M: PagingMode> kani::Arbitrary for VirtAddrGeneric<M> {
     fn any() -> Self {
         Self::new_truncate(kani::any())
     }
@@ -555,14 +929,15 @@ impl PhysAddr {
     #[cfg(feature = "memory_encryption")]
     #[inline]
     pub fn new_truncate(addr: u64) -> PhysAddr {
-        PhysAddr((addr % (1 << 52)) & !ENC_BIT_MASK.load(Ordering::Relaxed))
+        PhysAddr(addr & PHYSICAL_ADDRESS_MASK.load(Ordering::Relaxed))
     }
 
     /// Creates a new physical address, without any checks.
     ///
     /// ## Safety
     ///
-    /// You must make sure bits 52..64 are zero. This is not checked.
+    /// You must make sure bits 52..64 are zero and that no bits at or above
+    /// the encryption bit (if one is configured) are set. This is not checked.
     #[inline]
     pub const unsafe fn new_unsafe(addr: u64) -> PhysAddr {
         PhysAddr(addr)
@@ -777,6 +1152,154 @@ pub const fn align_up(addr: u64, align: u64) -> u64 {
 mod tests {
     use super::*;
 
+    /// Constructs a `VirtAddr` without checks, mirroring the tuple constructor that was
+    /// available before `VirtAddr` became an alias.
+    #[allow(non_snake_case)]
+    fn VirtAddr(addr: u64) -> VirtAddr {
+        unsafe { VirtAddr::new_unsafe(addr) }
+    }
+
+    /// Constructs a `VirtAddr57` without checks.
+    #[allow(non_snake_case)]
+    fn VirtAddr57(addr: u64) -> VirtAddr57 {
+        unsafe { VirtAddr57::new_unsafe(addr) }
+    }
+
+    #[test]
+    fn virtaddr_is_48_bit() {
+        let _: fn(u64) -> VirtAddr48 = VirtAddr::new;
+        assert_eq!(VirtAddr::BITS, 48);
+        assert_eq!(VirtAddr48::BITS, 48);
+        assert_eq!(VirtAddr57::BITS, 57);
+    }
+
+    #[test]
+    fn virtaddr_layout_is_transparent() {
+        assert_eq!(
+            core::mem::size_of::<VirtAddr48>(),
+            core::mem::size_of::<u64>()
+        );
+        assert_eq!(
+            core::mem::size_of::<VirtAddr57>(),
+            core::mem::size_of::<u64>()
+        );
+        assert_eq!(
+            core::mem::align_of::<VirtAddr48>(),
+            core::mem::align_of::<u64>()
+        );
+        assert_eq!(
+            core::mem::align_of::<VirtAddr57>(),
+            core::mem::align_of::<u64>()
+        );
+    }
+
+    #[test]
+    fn virtaddr_const_construction() {
+        const ADDR48: VirtAddr48 = VirtAddr48::new(0xffff_8000_0000_1234);
+        const ADDR57: VirtAddr57 = VirtAddr57::new(0xff80_0000_0000_1234);
+        const TRUNCATED57: VirtAddr57 = VirtAddr57::new_truncate(1 << 56);
+        assert_eq!(ADDR48.as_u64(), 0xffff_8000_0000_1234);
+        assert_eq!(ADDR57.as_u64(), 0xff80_0000_0000_1234);
+        assert_eq!(TRUNCATED57.as_u64(), 0xff00_0000_0000_0000);
+    }
+
+    #[test]
+    fn virtaddr_canonicality() {
+        assert!(VirtAddr48::try_new(0x0000_7fff_ffff_ffff).is_ok());
+        assert!(VirtAddr48::try_new(0x0000_8000_0000_0000).is_err());
+        assert!(VirtAddr48::try_new(0xffff_7fff_ffff_ffff).is_err());
+        assert!(VirtAddr48::try_new(0xffff_8000_0000_0000).is_ok());
+
+        assert!(VirtAddr57::try_new(0x0000_7fff_ffff_ffff).is_ok());
+        assert!(VirtAddr57::try_new(0x0000_8000_0000_0000).is_ok());
+        assert!(VirtAddr57::try_new(0x00ff_ffff_ffff_ffff).is_ok());
+        assert!(VirtAddr57::try_new(0x0100_0000_0000_0000).is_err());
+        assert!(VirtAddr57::try_new(0xfeff_ffff_ffff_ffff).is_err());
+        assert!(VirtAddr57::try_new(0xff00_0000_0000_0000).is_ok());
+        assert!(VirtAddr57::try_new(0xffff_8000_0000_0000).is_ok());
+    }
+
+    #[test]
+    fn virtaddr_conversions() {
+        let addr48 = VirtAddr48::new(0xffff_8000_0000_1234);
+        let addr57 = VirtAddr57::from(addr48);
+        assert_eq!(addr57.as_u64(), addr48.as_u64());
+        assert_eq!(VirtAddr48::try_from(addr57).unwrap(), addr48);
+
+        let addr57: VirtAddr57 = VirtAddr48::new(0x1234).into();
+        assert_eq!(addr57.as_u64(), 0x1234);
+
+        let only57 = VirtAddr57::new(0x0000_8000_0000_0000);
+        assert!(VirtAddr48::try_from(only57).is_err());
+        let only57 = VirtAddr57::new(0xff00_0000_0000_0000);
+        assert!(VirtAddr48::try_from(only57).is_err());
+    }
+
+    #[test]
+    fn raw_virtaddr_conversions() {
+        let raw = RawVirtAddr::new(0xffff_8000_0000_1234);
+        assert_eq!(raw.try_into_48().unwrap(), VirtAddr48::new(raw.as_u64()));
+        assert_eq!(raw.try_into_57().unwrap(), VirtAddr57::new(raw.as_u64()));
+
+        let only57 = RawVirtAddr::new(0x0000_8000_0000_0000);
+        assert!(only57.try_into_48().is_err());
+        assert!(VirtAddr48::try_from(only57).is_err());
+        assert_eq!(only57.try_into_57().unwrap().as_u64(), only57.as_u64());
+
+        let invalid = RawVirtAddr::new(0x0100_0000_0000_0000);
+        assert!(invalid.try_into_48().is_err());
+        assert!(invalid.try_into_57().is_err());
+
+        let from48: RawVirtAddr = VirtAddr48::new(0x1000).into();
+        let from57: RawVirtAddr = VirtAddr57::new(0x1000).into();
+        assert_eq!(from48, from57);
+        assert_eq!(from48.as_u64(), 0x1000);
+
+        const RAW: RawVirtAddr = RawVirtAddr::new(0x42);
+        const CHECKED: Result<VirtAddr48, VirtAddrNotValid> = RAW.try_into_48();
+        assert!(CHECKED.is_ok());
+    }
+
+    #[test]
+    fn raw_virtaddr_arithmetic() {
+        // Raw arithmetic doesn't jump or check the gap.
+        assert_eq!(
+            RawVirtAddr::new(0x7fff_ffff_ffff) + 1,
+            RawVirtAddr::new(0x8000_0000_0000)
+        );
+        assert_eq!(RawVirtAddr::new(0x2000) - RawVirtAddr::new(0x1000), 0x1000);
+        let mut addr = RawVirtAddr::new(0x1000);
+        addr += 2;
+        addr -= 1;
+        assert_eq!(addr.as_u64(), 0x1001);
+    }
+
+    #[test]
+    #[should_panic]
+    fn raw_virtaddr_add_overflow() {
+        let _ = RawVirtAddr::new(u64::MAX) + 1;
+    }
+
+    #[test]
+    fn virtaddr_page_table_indices() {
+        let addr = VirtAddr57::new(0xff00_0000_0000_0000);
+        assert_eq!(u16::from(addr.p5_index()), 0x100);
+        assert_eq!(u16::from(addr.p4_index()), 0);
+        let addr = VirtAddr57::new(0xffff_8000_0000_0000);
+        assert_eq!(u16::from(addr.p5_index()), 0x1ff);
+        assert_eq!(u16::from(addr.p4_index()), 0x100);
+        let addr = VirtAddr57::new(0x00ff_8000_0000_0000);
+        assert_eq!(u16::from(addr.p5_index()), 0xff);
+        assert_eq!(u16::from(addr.p4_index()), 0x100);
+
+        let addr = VirtAddr48::new(0xffff_8000_0000_0000);
+        assert_eq!(u16::from(addr.p5_index()), 0x1ff);
+        assert_eq!(u16::from(addr.p4_index()), 0x100);
+        let addr = VirtAddr48::new(0x0000_7fff_ffff_ffff);
+        assert_eq!(u16::from(addr.p5_index()), 0);
+        assert_eq!(u16::from(addr.p4_index()), 0xff);
+    }
+
     #[test]
     #[should_panic]
     pub fn add_overflow_virtaddr() {
@@ -802,6 +1325,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic = "attempt to add resulted in non-canonical virtual address"]
+    pub fn add_into_gap_virtaddr57() {
+        let _ = VirtAddr57::new(0x00ff_ffff_ffff_ffff) + 1;
+    }
+
+    #[test]
     pub fn virtaddr_new_truncate() {
         assert_eq!(VirtAddr::new_truncate(0), VirtAddr(0));
         assert_eq!(VirtAddr::new_truncate(1 << 47), VirtAddr(0xfffff << 47));
@@ -810,130 +1339,83 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "step_trait")]
-    fn virtaddr_step_forward() {
-        assert_eq!(Step::forward(VirtAddr(0), 0), VirtAddr(0));
-        assert_eq!(Step::forward(VirtAddr(0), 1), VirtAddr(1));
-        assert_eq!(
-            Step::forward(VirtAddr(0x7fff_ffff_ffff), 1),
-            VirtAddr(0xffff_8000_0000_0000)
-        );
-        assert_eq!(
-            Step::forward(VirtAddr(0xffff_8000_0000_0000), 1),
-            VirtAddr(0xffff_8000_0000_0001)
-        );
-        assert_eq!(
-            Step::forward_checked(VirtAddr(0xffff_ffff_ffff_ffff), 1),
-            None
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::forward(VirtAddr(0x7fff_ffff_ffff), 0x1234_5678_9abd),
-            VirtAddr(0xffff_9234_5678_9abc)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::forward(VirtAddr(0x7fff_ffff_ffff), 0x8000_0000_0000),
-            VirtAddr(0xffff_ffff_ffff_ffff)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::forward(VirtAddr(0x7fff_ffff_ff00), 0x8000_0000_00ff),
-            VirtAddr(0xffff_ffff_ffff_ffff)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::forward_checked(VirtAddr(0x7fff_ffff_ff00), 0x8000_0000_0100),
-            None
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::forward_checked(VirtAddr(0x7fff_ffff_ffff), 0x8000_0000_0001),
-            None
-        );
+    pub fn virtaddr57_new_truncate() {
+        assert_eq!(VirtAddr57::new_truncate(0), VirtAddr57(0));
+        assert_eq!(VirtAddr57::new_truncate(1 << 47), VirtAddr57(1 << 47));
+        assert_eq!(VirtAddr57::new_truncate(1 << 56), VirtAddr57(0xff << 56));
+        assert_eq!(VirtAddr57::new_truncate(123), VirtAddr57(123));
+        assert_eq!(VirtAddr57::new_truncate(123 << 56), VirtAddr57(0xff << 56));
+        assert_eq!(VirtAddr57::new_truncate(122 << 56), VirtAddr57(0));
     }
 
-    #[test]
+    /// Checks the `Step` implementation around the non-canonical gap of the address space
+    /// of paging mode `M`.
+    ///
+    /// All addresses are expressed relative to the gap, so the same checks apply to both
+    /// paging modes.
     #[cfg(feature = "step_trait")]
-    fn virtaddr_step_backward() {
-        assert_eq!(Step::backward(VirtAddr(0), 0), VirtAddr(0));
-        assert_eq!(Step::backward_checked(VirtAddr(0), 1), None);
-        assert_eq!(Step::backward(VirtAddr(1), 1), VirtAddr(0));
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_8000_0000_0000), 1),
-            VirtAddr(0x7fff_ffff_ffff)
-        );
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_8000_0000_0001), 1),
-            VirtAddr(0xffff_8000_0000_0000)
-        );
+    fn check_step_around_gap<M: PagingMode>() {
+        let addr = |addr: u64| unsafe { VirtAddrGeneric::<M>::new_unsafe(addr) };
+        let lower_end = VirtAddrGeneric::<M>::lower_half_end();
+        let upper_start = VirtAddrGeneric::<M>::upper_half_start();
+        let last = addr(u64::MAX);
+        // The number of addresses in each half of the address space.
         #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_9234_5678_9abc), 0x1234_5678_9abd),
-            VirtAddr(0x7fff_ffff_ffff)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_8000_0000_0000), 0x8000_0000_0000),
-            VirtAddr(0)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_8000_0000_0000), 0x7fff_ffff_ff01),
-            VirtAddr(0xff)
-        );
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            Step::backward_checked(VirtAddr(0xffff_8000_0000_0000), 0x8000_0000_0001),
-            None
-        );
-    }
+        let half = 1u64 << (M::VIRT_ADDR_BITS - 1);
 
-    #[test]
-    #[cfg(feature = "step_trait")]
-    fn virtaddr_steps_between() {
+        // forward
+        assert_eq!(Step::forward(addr(0), 0), addr(0));
+        assert_eq!(Step::forward(addr(0), 1), addr(1));
+        assert_eq!(Step::forward(lower_end, 1), upper_start);
+        assert_eq!(Step::forward(upper_start, 1), upper_start + 1);
+        assert_eq!(Step::forward_checked(last, 1), None);
+        #[cfg(target_pointer_width = "64")]
+        {
+            let half = half as usize;
+            assert_eq!(
+                Step::forward(lower_end, 0x1234_5678_9abd),
+                upper_start + 0x1234_5678_9abc
+            );
+            assert_eq!(Step::forward(lower_end, half), last);
+            assert_eq!(Step::forward(lower_end - 0xff, half + 0xff), last);
+            assert_eq!(Step::forward_checked(lower_end - 0xff, half + 0x100), None);
+            assert_eq!(Step::forward_checked(lower_end, half + 1), None);
+        }
+
+        // backward
+        assert_eq!(Step::backward(addr(0), 0), addr(0));
+        assert_eq!(Step::backward_checked(addr(0), 1), None);
+        assert_eq!(Step::backward(addr(1), 1), addr(0));
+        assert_eq!(Step::backward(upper_start, 1), lower_end);
+        assert_eq!(Step::backward(upper_start + 1, 1), upper_start);
+        #[cfg(target_pointer_width = "64")]
+        {
+            let half = half as usize;
+            assert_eq!(
+                Step::backward(upper_start + 0x1234_5678_9abc, 0x1234_5678_9abd),
+                lower_end
+            );
+            assert_eq!(Step::backward(upper_start, half), addr(0));
+            assert_eq!(Step::backward(upper_start, half - 0xff), addr(0xff));
+            assert_eq!(Step::backward_checked(upper_start, half + 1), None);
+        }
+
+        // steps_between
+        assert_eq!(Step::steps_between(&addr(0), &addr(0)), (0, Some(0)));
+        assert_eq!(Step::steps_between(&addr(0), &addr(1)), (1, Some(1)));
+        assert_eq!(Step::steps_between(&addr(1), &addr(0)), (0, None));
+        assert_eq!(Step::steps_between(&lower_end, &upper_start), (1, Some(1)));
+        assert_eq!(Step::steps_between(&upper_start, &lower_end), (0, None));
         assert_eq!(
-            Step::steps_between(&VirtAddr(0), &VirtAddr(0)),
+            Step::steps_between(&upper_start, &upper_start),
             (0, Some(0))
         );
         assert_eq!(
-            Step::steps_between(&VirtAddr(0), &VirtAddr(1)),
-            (1, Some(1))
-        );
-        assert_eq!(Step::steps_between(&VirtAddr(1), &VirtAddr(0)), (0, None));
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0x7fff_ffff_ffff),
-                &VirtAddr(0xffff_8000_0000_0000)
-            ),
+            Step::steps_between(&upper_start, &(upper_start + 1)),
             (1, Some(1))
         );
         assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0xffff_8000_0000_0000),
-                &VirtAddr(0x7fff_ffff_ffff)
-            ),
-            (0, None)
-        );
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0xffff_8000_0000_0000),
-                &VirtAddr(0xffff_8000_0000_0000)
-            ),
-            (0, Some(0))
-        );
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0xffff_8000_0000_0000),
-                &VirtAddr(0xffff_8000_0000_0001)
-            ),
-            (1, Some(1))
-        );
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0xffff_8000_0000_0001),
-                &VirtAddr(0xffff_8000_0000_0000)
-            ),
+            Step::steps_between(&(upper_start + 1), &upper_start),
             (0, None)
         );
         // Make sure that we handle `steps > u32::MAX` correctly on 32-bit
@@ -943,34 +1425,84 @@ mod tests {
         // bound of `usize::MAX` and don't return an upper bound.
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
-            Step::steps_between(&VirtAddr(0), &VirtAddr(0x1_0000_0000)),
+            Step::steps_between(&addr(0), &addr(0x1_0000_0000)),
             (0x1_0000_0000, Some(0x1_0000_0000))
         );
         #[cfg(not(target_pointer_width = "64"))]
         assert_eq!(
-            Step::steps_between(&VirtAddr(0), &VirtAddr(0x1_0000_0000)),
+            Step::steps_between(&addr(0), &addr(0x1_0000_0000)),
             (usize::MAX, None)
         );
+
+        // overflowing
+        assert_eq!(
+            Step::forward_overflowing(lower_end, 1),
+            (upper_start, false)
+        );
+        assert_eq!(
+            Step::backward_overflowing(upper_start, 1),
+            (lower_end, false)
+        );
+        assert_eq!(Step::forward_overflowing(addr(0), 0), (addr(0), false));
+        assert!(Step::forward_overflowing(last, 1).1);
+        assert!(Step::backward_overflowing(addr(0), 1).1);
     }
 
     #[test]
     #[cfg(feature = "step_trait")]
-    fn virtaddr_step_overflowing() {
+    fn virtaddr_step_around_gap() {
+        check_step_around_gap::<FourLevelPaging>();
+        check_step_around_gap::<FiveLevelPaging>();
+    }
+
+    #[test]
+    fn paging_mode_constants() {
+        // Every page table level translates 9 bits, the page offset 12 bits.
+        assert_eq!(FourLevelPaging::LEVELS, 4);
+        assert_eq!(FiveLevelPaging::LEVELS, 5);
+        assert_eq!(FourLevelPaging::VIRT_ADDR_BITS, 12 + 9 * 4);
+        assert_eq!(FiveLevelPaging::VIRT_ADDR_BITS, 12 + 9 * 5);
+        assert_eq!(VirtAddr48::BITS, FourLevelPaging::VIRT_ADDR_BITS);
+        assert_eq!(VirtAddr57::BITS, FiveLevelPaging::VIRT_ADDR_BITS);
+    }
+
+    #[test]
+    #[cfg(feature = "step_trait")]
+    fn virtaddr_gap_positions() {
+        // Make sure the relative checks above cover the right absolute addresses.
+        assert_eq!(VirtAddr48::lower_half_end(), VirtAddr(0x7fff_ffff_ffff));
         assert_eq!(
-            Step::forward_overflowing(VirtAddr(0x7fff_ffff_ffff), 1),
-            (VirtAddr(0xffff_8000_0000_0000), false)
+            VirtAddr48::upper_half_start(),
+            VirtAddr(0xffff_8000_0000_0000)
         );
         assert_eq!(
-            Step::backward_overflowing(VirtAddr(0xffff_8000_0000_0000), 1),
-            (VirtAddr(0x7fff_ffff_ffff), false)
+            VirtAddr57::lower_half_end(),
+            VirtAddr57(0x00ff_ffff_ffff_ffff)
         );
         assert_eq!(
-            Step::forward_overflowing(VirtAddr(0), 0),
-            (VirtAddr(0), false)
+            VirtAddr57::upper_half_start(),
+            VirtAddr57(0xff00_0000_0000_0000)
         );
 
-        assert!(Step::forward_overflowing(VirtAddr(0xffff_ffff_ffff_ffff), 1).1);
-        assert!(Step::backward_overflowing(VirtAddr(0), 1).1);
+        // The 48-bit gap is not a gap for 57-bit addresses.
+        assert_eq!(
+            Step::forward(VirtAddr57(0x7fff_ffff_ffff), 1),
+            VirtAddr57(0x8000_0000_0000)
+        );
+        assert_eq!(
+            Step::backward(VirtAddr57(0xffff_8000_0000_0000), 1),
+            VirtAddr57(0xffff_7fff_ffff_ffff)
+        );
+        // The number of steps across the 57-bit gap doesn't fit into `usize` on 32-bit
+        // targets.
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            Step::steps_between(
+                &VirtAddr57(0x7fff_ffff_ffff),
+                &VirtAddr57(0xffff_8000_0000_0000)
+            ),
+            (0x01ff_0000_0000_0001, Some(0x01ff_0000_0000_0001))
+        );
     }
 
     #[test]
@@ -997,6 +1529,11 @@ mod tests {
             VirtAddr::new(0x7fff_ffff_ffff).align_up(2u64),
             VirtAddr::new(0xffff_8000_0000_0000)
         );
+        // Make sure the 56th bit is extended.
+        assert_eq!(
+            VirtAddr57::new(0x00ff_ffff_ffff_ffff).align_up(2u64),
+            VirtAddr57::new(0xff00_0000_0000_0000)
+        );
     }
 
     #[test]
@@ -1005,6 +1542,11 @@ mod tests {
         assert_eq!(
             VirtAddr::new(0xffff_8000_0000_0000).align_down(1u64 << 48),
             VirtAddr::new(0)
+        );
+        // Make sure the 56th bit is extended.
+        assert_eq!(
+            VirtAddr57::new(0xff00_0000_0000_0000).align_down(1u64 << 57),
+            VirtAddr57::new(0)
         );
     }
 
@@ -1040,38 +1582,48 @@ mod proofs {
     // implementation of VirtAddr.
 
     // This harness proves that our implementation can correctly take 0 or 1
-    // step starting from any address.
-    #[kani::proof]
-    fn forward_base_case() {
-        let start = kani::any::<VirtAddr>();
+    // step starting from any address of paging mode `M`.
+    fn forward_base_case_harness<M: PagingMode>() {
+        let start = kani::any::<VirtAddrGeneric<M>>();
         let start_raw = start.as_u64();
+        let lower_end = VirtAddrGeneric::<M>::lower_half_end().as_u64();
+        let upper_start = VirtAddrGeneric::<M>::upper_half_start().as_u64();
 
         // Adding 0 to any address should always yield the same address.
         let same = Step::forward(start, 0);
         assert!(start == same);
 
         // Manually calculate the expected address after stepping once.
-        let expected = match start_raw {
-            // Adding 1 to addresses in this range don't require gap jumps, so
-            // we can just add 1.
-            0x0000_0000_0000_0000..=0x0000_7fff_ffff_fffe => Some(start_raw + 1),
+        let expected = if start_raw == lower_end {
             // Adding 1 to this address jumps the gap.
-            0x0000_7fff_ffff_ffff => Some(0xffff_8000_0000_0000),
-            // The range of non-canonical addresses.
-            0x0000_8000_0000_0000..=0xffff_7fff_ffff_ffff => unreachable!(),
+            Some(upper_start)
+        } else if start_raw == u64::MAX {
+            // Adding 1 to this address causes an overflow.
+            None
+        } else {
+            // The range of non-canonical addresses can't occur.
+            assert!(start_raw < lower_end || start_raw >= upper_start);
             // Adding 1 to addresses in this range don't require gap jumps, so
             // we can just add 1.
-            0xffff_8000_0000_0000..=0xffff_ffff_ffff_fffe => Some(start_raw + 1),
-            // Adding 1 to this address causes an overflow.
-            0xffff_ffff_ffff_ffff => None,
+            Some(start_raw + 1)
         };
         if let Some(expected) = expected {
             // Verify that `expected` is a valid address.
-            assert!(VirtAddr::try_new(expected).is_ok());
+            assert!(VirtAddrGeneric::<M>::try_new(expected).is_ok());
         }
         // Verify `forward_checked`.
         let next = Step::forward_checked(start, 1);
-        assert!(next.map(VirtAddr::as_u64) == expected);
+        assert!(next.map(VirtAddrGeneric::as_u64) == expected);
+    }
+
+    #[kani::proof]
+    fn forward_base_case() {
+        forward_base_case_harness::<FourLevelPaging>();
+    }
+
+    #[kani::proof]
+    fn forward_base_case_57() {
+        forward_base_case_harness::<FiveLevelPaging>();
     }
 
     // This harness proves that the result of taking two small steps is the
