@@ -2,7 +2,7 @@
 
 pub use crate::registers::segmentation::{CS, DS, ES, FS, GS, SS, Segment, Segment64};
 use crate::{
-    addr::{RawVirtAddr, VirtAddrGeneric, VirtAddrWidth},
+    addr::{PagingMode, RawVirtAddr, VirtAddrGeneric},
     registers::model_specific::{FsBase, GsBase, Msr},
     structures::gdt::SegmentSelector,
 };
@@ -50,7 +50,7 @@ macro_rules! segment64_impl {
             }
 
             #[inline]
-            unsafe fn write_base<W: VirtAddrWidth>(base: VirtAddrGeneric<W>) {
+            unsafe fn write_base<M: PagingMode>(base: VirtAddrGeneric<M>) {
                 unsafe{
                     asm!(concat!("wr", $name, "base {}"), in(reg) base.as_u64(), options(nostack, preserves_flags));
                 }

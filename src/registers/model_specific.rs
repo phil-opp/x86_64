@@ -252,7 +252,7 @@ mod x86_64 {
     use super::*;
     use crate::PhysAddr;
     use crate::PrivilegeLevel;
-    use crate::addr::{RawVirtAddr, VirtAddrGeneric, VirtAddrWidth};
+    use crate::addr::{PagingMode, RawVirtAddr, VirtAddrGeneric};
     use crate::registers::rflags::RFlags;
     use crate::structures::gdt::SegmentSelector;
     use crate::structures::paging::Page;
@@ -405,7 +405,7 @@ mod x86_64 {
         /// The caller must ensure that this write operation has no unsafe side
         /// effects, as the segment base address might be in use.
         #[inline]
-        pub unsafe fn write<W: VirtAddrWidth>(address: VirtAddrGeneric<W>) {
+        pub unsafe fn write<M: PagingMode>(address: VirtAddrGeneric<M>) {
             let mut msr = Self::MSR;
             unsafe { msr.write(address.as_u64()) };
         }
@@ -435,7 +435,7 @@ mod x86_64 {
         /// The caller must ensure that this write operation has no unsafe side
         /// effects, as the segment base address might be in use.
         #[inline]
-        pub unsafe fn write<W: VirtAddrWidth>(address: VirtAddrGeneric<W>) {
+        pub unsafe fn write<M: PagingMode>(address: VirtAddrGeneric<M>) {
             let mut msr = Self::MSR;
             unsafe { msr.write(address.as_u64()) };
         }
@@ -458,7 +458,7 @@ mod x86_64 {
         ///
         /// The caller must ensure that a future call to [`GS::swap`] has no unsafe side effects.
         #[inline]
-        pub unsafe fn write<W: VirtAddrWidth>(address: VirtAddrGeneric<W>) {
+        pub unsafe fn write<M: PagingMode>(address: VirtAddrGeneric<M>) {
             let mut msr = Self::MSR;
             unsafe { msr.write(address.as_u64()) };
         }
@@ -620,7 +620,7 @@ mod x86_64 {
         /// Write a given virtual address to the LStar register.
         /// This holds the target RIP of a syscall.
         #[inline]
-        pub fn write<W: VirtAddrWidth>(address: VirtAddrGeneric<W>) {
+        pub fn write<M: PagingMode>(address: VirtAddrGeneric<M>) {
             let mut msr = Self::MSR;
             unsafe { msr.write(address.as_u64()) };
         }
@@ -700,7 +700,7 @@ mod x86_64 {
 
         /// Write IA32_U_CET.
         #[inline]
-        pub fn write<W: VirtAddrWidth>(flags: CetFlags, legacy_bitmap: Page<Size4KiB, W>) {
+        pub fn write<M: PagingMode>(flags: CetFlags, legacy_bitmap: Page<Size4KiB, M>) {
             Self::write_raw(flags.bits() | legacy_bitmap.start_address().as_u64());
         }
 
@@ -749,7 +749,7 @@ mod x86_64 {
 
         /// Write IA32_S_CET.
         #[inline]
-        pub fn write<W: VirtAddrWidth>(flags: CetFlags, legacy_bitmap: Page<Size4KiB, W>) {
+        pub fn write<M: PagingMode>(flags: CetFlags, legacy_bitmap: Page<Size4KiB, M>) {
             Self::write_raw(flags.bits() | legacy_bitmap.start_address().as_u64());
         }
 

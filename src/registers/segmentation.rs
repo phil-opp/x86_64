@@ -2,7 +2,7 @@
 
 use super::model_specific::Msr;
 use crate::PrivilegeLevel;
-use crate::addr::{RawVirtAddr, VirtAddrGeneric, VirtAddrWidth};
+use crate::addr::{PagingMode, RawVirtAddr, VirtAddrGeneric};
 use bit_field::BitField;
 use core::fmt;
 // imports for intra doc links
@@ -61,7 +61,7 @@ pub trait Segment64: Segment {
     ///
     /// The caller must ensure that this write operation has no unsafe side
     /// effects, as the segment base address might be in use.
-    unsafe fn write_base<W: VirtAddrWidth>(base: VirtAddrGeneric<W>);
+    unsafe fn write_base<M: PagingMode>(base: VirtAddrGeneric<M>);
 }
 
 /// Specifies which element to load into a segment from

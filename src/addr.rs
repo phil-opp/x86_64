@@ -18,47 +18,58 @@ use crate::structures::paging::{PageOffset, PageTableIndex};
 
 use dep_const_fn::const_fn;
 
-/// The width of a canonical virtual address.
+/// A paging mode of the CPU: 4-level or 5-level paging.
 ///
-/// On `x86_64`, virtual addresses are canonical if all bits above the most significant
-/// valid bit are copies of that bit. How many bits are valid depends on the paging mode
-/// that the CPU uses:
+/// The paging mode determines the depth of the page table hierarchy and, with it, the
+/// number of valid bits in a virtual address. Virtual addresses are canonical if all bits
+/// above the most significant valid bit are copies of that bit.
 ///
-/// - With 4-level paging, the lower 48 bits are valid ([`Width48`]).
-/// - With 5-level paging, the lower 57 bits are valid ([`Width57`]).
+/// - [`FourLevelPaging`]: four page table levels, the lower 48 bits of an address are valid.
+/// - [`FiveLevelPaging`]: five page table levels, the lower 57 bits of an address are valid.
+///
+/// Types that depend on the paging mode, such as [`VirtAddrGeneric`],
+/// [`Page`](crate::structures::paging::Page), or the
+/// [`Mapper`](crate::structures::paging::Mapper) trait, take the mode as a type parameter
+/// that defaults to [`FourLevelPaging`].
 ///
 /// This trait is sealed and cannot be implemented outside this crate.
-pub trait VirtAddrWidth: Copy + Eq + PartialOrd + Ord + Hash + Sealed {
-    /// The number of valid bits in a virtual address of this width.
-    const BITS: u32;
+pub trait PagingMode: Copy + Eq + PartialOrd + Ord + Hash + Sealed {
+    /// The number of page table levels.
+    const LEVELS: u8;
 
-    /// The name of the address type of this width, as used in `Debug` output.
+    /// The number of valid bits in a virtual address.
+    const VIRT_ADDR_BITS: u32;
+
+    /// The name of the virtual address type of this paging mode, as used in `Debug`
+    /// output.
     const TYPE_NAME: &'static str;
 }
 
-/// The width of virtual addresses with 4-level paging: 48 bits are valid.
+/// 4-level paging: four page table levels and 48-bit virtual addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Width48 {}
+pub enum FourLevelPaging {}
 
-/// The width of virtual addresses with 5-level paging: 57 bits are valid.
+/// 5-level paging: five page table levels and 57-bit virtual addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Width57 {}
+pub enum FiveLevelPaging {}
 
-impl VirtAddrWidth for Width48 {
-    const BITS: u32 = 48;
+impl PagingMode for FourLevelPaging {
+    const LEVELS: u8 = 4;
+    const VIRT_ADDR_BITS: u32 = 48;
     const TYPE_NAME: &'static str = "VirtAddr";
 }
 
-impl Sealed for Width48 {}
+impl Sealed for FourLevelPaging {}
 
-impl VirtAddrWidth for Width57 {
-    const BITS: u32 = 57;
+impl PagingMode for FiveLevelPaging {
+    const LEVELS: u8 = 5;
+    const VIRT_ADDR_BITS: u32 = 57;
     const TYPE_NAME: &'static str = "VirtAddr57";
 }
 
-impl Sealed for Width57 {}
+impl Sealed for FiveLevelPaging {}
 
-/// A canonical 64-bit virtual memory address of the given [width](VirtAddrWidth).
+/// A canonical 64-bit virtual memory address for the given [paging mode](PagingMode).
 ///
 /// This is a wrapper type around an `u64`, so it is always 8 bytes, even when compiled
 /// on non 64-bit systems. The
@@ -70,7 +81,7 @@ impl Sealed for Width57 {}
 /// 5-level paging. The remaining upper bits need to be copies of the most significant
 /// valid bit (bit 47 or bit 56, respectively). Addresses that fulfil this criterion are
 /// called “canonical”. This type guarantees that it always represents a canonical address
-/// of its width.
+/// for its paging mode `M`.
 ///
 /// Most code should use the [`VirtAddr48`] and [`VirtAddr57`] type aliases instead of
 /// naming this type directly. [`VirtAddr`] is an alias for [`VirtAddr48`].
@@ -86,17 +97,17 @@ impl Sealed for Width57 {}
 /// This struct has the same representation as a [`u64`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct VirtAddrGeneric<W: VirtAddrWidth>(u64, PhantomData<W>);
+pub struct VirtAddrGeneric<M: PagingMode>(u64, PhantomData<M>);
 
 /// A canonical 48-bit virtual memory address, as used with 4-level paging.
 ///
 /// The top 16 bits need to be copies of bit 47. See [`VirtAddrGeneric`] for details.
-pub type VirtAddr48 = VirtAddrGeneric<Width48>;
+pub type VirtAddr48 = VirtAddrGeneric<FourLevelPaging>;
 
 /// A canonical 57-bit virtual memory address, as used with 5-level paging.
 ///
 /// The top 7 bits need to be copies of bit 56. See [`VirtAddrGeneric`] for details.
-pub type VirtAddr57 = VirtAddrGeneric<Width57>;
+pub type VirtAddr57 = VirtAddrGeneric<FiveLevelPaging>;
 
 /// A canonical 48-bit virtual memory address.
 ///
@@ -161,17 +172,17 @@ impl core::fmt::Debug for VirtAddrNotValid {
     }
 }
 
-impl<W: VirtAddrWidth> VirtAddrGeneric<W> {
+impl<M: PagingMode> VirtAddrGeneric<M> {
     /// The number of valid bits in this virtual address type.
     ///
     /// This is 48 for [`VirtAddr48`] and 57 for [`VirtAddr57`].
-    pub const BITS: u32 = W::BITS;
+    pub const BITS: u32 = M::VIRT_ADDR_BITS;
 
     /// The number of canonical addresses, i.e. `2^BITS`.
-    const ADDRESS_SPACE_SIZE: u64 = 1 << W::BITS;
+    const ADDRESS_SPACE_SIZE: u64 = 1 << M::VIRT_ADDR_BITS;
 
     /// The number of bits that must be a sign extension of the most significant valid bit.
-    const SIGN_EXTENSION_BITS: u32 = 64 - W::BITS;
+    const SIGN_EXTENSION_BITS: u32 = 64 - M::VIRT_ADDR_BITS;
 
     /// Creates a new canonical virtual address.
     ///
@@ -379,7 +390,7 @@ impl<W: VirtAddrWidth> VirtAddrGeneric<W> {
     /// space.
     #[inline]
     pub(crate) const fn upper_half_start() -> Self {
-        Self::new_truncate(1 << (W::BITS - 1))
+        Self::new_truncate(1 << (M::VIRT_ADDR_BITS - 1))
     }
 
     /// Returns the last address of the lower half of the canonical address space.
@@ -388,7 +399,7 @@ impl<W: VirtAddrWidth> VirtAddrGeneric<W> {
     /// space.
     #[inline]
     pub(crate) const fn lower_half_end() -> Self {
-        Self::new_truncate((1 << (W::BITS - 1)) - 1)
+        Self::new_truncate((1 << (M::VIRT_ADDR_BITS - 1)) - 1)
     }
 
     // FIXME: Move this into the `Step` impl, once `Step` is stabilized.
@@ -456,50 +467,50 @@ impl<W: VirtAddrWidth> VirtAddrGeneric<W> {
     }
 }
 
-impl<W: VirtAddrWidth> fmt::Debug for VirtAddrGeneric<W> {
+impl<M: PagingMode> fmt::Debug for VirtAddrGeneric<M> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple(W::TYPE_NAME)
+        f.debug_tuple(M::TYPE_NAME)
             .field(&format_args!("{:#x}", self.0))
             .finish()
     }
 }
 
-impl<W: VirtAddrWidth> fmt::Binary for VirtAddrGeneric<W> {
+impl<M: PagingMode> fmt::Binary for VirtAddrGeneric<M> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Binary::fmt(&self.0, f)
     }
 }
 
-impl<W: VirtAddrWidth> fmt::LowerHex for VirtAddrGeneric<W> {
+impl<M: PagingMode> fmt::LowerHex for VirtAddrGeneric<M> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::LowerHex::fmt(&self.0, f)
     }
 }
 
-impl<W: VirtAddrWidth> fmt::Octal for VirtAddrGeneric<W> {
+impl<M: PagingMode> fmt::Octal for VirtAddrGeneric<M> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Octal::fmt(&self.0, f)
     }
 }
 
-impl<W: VirtAddrWidth> fmt::UpperHex for VirtAddrGeneric<W> {
+impl<M: PagingMode> fmt::UpperHex for VirtAddrGeneric<M> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::UpperHex::fmt(&self.0, f)
     }
 }
 
-impl<W: VirtAddrWidth> fmt::Pointer for VirtAddrGeneric<W> {
+impl<M: PagingMode> fmt::Pointer for VirtAddrGeneric<M> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Pointer::fmt(&(self.0 as *const ()), f)
     }
 }
 
-impl<W: VirtAddrWidth> Add<u64> for VirtAddrGeneric<W> {
+impl<M: PagingMode> Add<u64> for VirtAddrGeneric<M> {
     type Output = Self;
 
     #[cfg_attr(not(feature = "step_trait"), allow(rustdoc::broken_intra_doc_links))]
@@ -524,7 +535,7 @@ impl<W: VirtAddrWidth> Add<u64> for VirtAddrGeneric<W> {
     }
 }
 
-impl<W: VirtAddrWidth> AddAssign<u64> for VirtAddrGeneric<W> {
+impl<M: PagingMode> AddAssign<u64> for VirtAddrGeneric<M> {
     #[cfg_attr(not(feature = "step_trait"), allow(rustdoc::broken_intra_doc_links))]
     /// Add an offset to a virtual address.
     ///
@@ -542,7 +553,7 @@ impl<W: VirtAddrWidth> AddAssign<u64> for VirtAddrGeneric<W> {
     }
 }
 
-impl<W: VirtAddrWidth> Sub<u64> for VirtAddrGeneric<W> {
+impl<M: PagingMode> Sub<u64> for VirtAddrGeneric<M> {
     type Output = Self;
 
     #[cfg_attr(not(feature = "step_trait"), allow(rustdoc::broken_intra_doc_links))]
@@ -567,7 +578,7 @@ impl<W: VirtAddrWidth> Sub<u64> for VirtAddrGeneric<W> {
     }
 }
 
-impl<W: VirtAddrWidth> SubAssign<u64> for VirtAddrGeneric<W> {
+impl<M: PagingMode> SubAssign<u64> for VirtAddrGeneric<M> {
     #[cfg_attr(not(feature = "step_trait"), allow(rustdoc::broken_intra_doc_links))]
     /// Subtract an offset from a virtual address.
     ///
@@ -585,7 +596,7 @@ impl<W: VirtAddrWidth> SubAssign<u64> for VirtAddrGeneric<W> {
     }
 }
 
-impl<W: VirtAddrWidth> Sub<VirtAddrGeneric<W>> for VirtAddrGeneric<W> {
+impl<M: PagingMode> Sub<VirtAddrGeneric<M>> for VirtAddrGeneric<M> {
     type Output = u64;
 
     /// Returns the difference between two addresses.
@@ -594,7 +605,7 @@ impl<W: VirtAddrWidth> Sub<VirtAddrGeneric<W>> for VirtAddrGeneric<W> {
     ///
     /// This function will panic on overflow.
     #[inline]
-    fn sub(self, rhs: VirtAddrGeneric<W>) -> Self::Output {
+    fn sub(self, rhs: VirtAddrGeneric<M>) -> Self::Output {
         self.as_u64()
             .checked_sub(rhs.as_u64())
             .expect("attempt to subtract with overflow")
@@ -675,14 +686,14 @@ impl RawVirtAddr {
         self.0 == 0
     }
 
-    /// Tries to convert the address into a canonical address of the given
-    /// [width](VirtAddrWidth).
+    /// Tries to convert the address into a canonical address for the given
+    /// [paging mode](PagingMode).
     ///
-    /// Fails if the address is not canonical for that width.
+    /// Fails if the address is not canonical for that paging mode.
     #[inline]
-    pub const fn try_into_width<W: VirtAddrWidth>(
+    pub const fn try_into_mode<M: PagingMode>(
         self,
-    ) -> Result<VirtAddrGeneric<W>, VirtAddrNotValid> {
+    ) -> Result<VirtAddrGeneric<M>, VirtAddrNotValid> {
         VirtAddrGeneric::try_new(self.0)
     }
 
@@ -692,7 +703,7 @@ impl RawVirtAddr {
     /// conversion to use in kernels that run with 4-level paging.
     #[inline]
     pub const fn try_into_48(self) -> Result<VirtAddr48, VirtAddrNotValid> {
-        self.try_into_width()
+        self.try_into_mode()
     }
 
     /// Tries to convert the address into a canonical 57-bit address.
@@ -701,25 +712,25 @@ impl RawVirtAddr {
     /// conversion to use in kernels that run with 5-level paging.
     #[inline]
     pub const fn try_into_57(self) -> Result<VirtAddr57, VirtAddrNotValid> {
-        self.try_into_width()
+        self.try_into_mode()
     }
 }
 
-impl<W: VirtAddrWidth> From<VirtAddrGeneric<W>> for RawVirtAddr {
+impl<M: PagingMode> From<VirtAddrGeneric<M>> for RawVirtAddr {
     /// Discards the canonicality guarantee of a checked virtual address.
     #[inline]
-    fn from(addr: VirtAddrGeneric<W>) -> Self {
+    fn from(addr: VirtAddrGeneric<M>) -> Self {
         RawVirtAddr(addr.as_u64())
     }
 }
 
-impl<W: VirtAddrWidth> TryFrom<RawVirtAddr> for VirtAddrGeneric<W> {
+impl<M: PagingMode> TryFrom<RawVirtAddr> for VirtAddrGeneric<M> {
     type Error = VirtAddrNotValid;
 
-    /// Checks that the raw address is canonical for the width `W`.
+    /// Checks that the raw address is canonical for the paging mode `M`.
     #[inline]
     fn try_from(addr: RawVirtAddr) -> Result<Self, Self::Error> {
-        addr.try_into_width()
+        addr.try_into_mode()
     }
 }
 
@@ -833,7 +844,7 @@ impl Sub<RawVirtAddr> for RawVirtAddr {
 }
 
 #[cfg(feature = "step_trait")]
-impl<W: VirtAddrWidth> Step for VirtAddrGeneric<W> {
+impl<M: PagingMode> Step for VirtAddrGeneric<M> {
     #[inline]
     fn steps_between(start: &Self, end: &Self) -> (usize, Option<usize>) {
         Self::steps_between_impl(start, end)
@@ -867,7 +878,7 @@ impl<W: VirtAddrWidth> Step for VirtAddrGeneric<W> {
 }
 
 #[cfg(kani)]
-impl<W: VirtAddrWidth> kani::Arbitrary for VirtAddrGeneric<W> {
+impl<M: PagingMode> kani::Arbitrary for VirtAddrGeneric<M> {
     fn any() -> Self {
         Self::new_truncate(kani::any())
     }
@@ -1338,19 +1349,19 @@ mod tests {
     }
 
     /// Checks the `Step` implementation around the non-canonical gap of the address space
-    /// of width `W`.
+    /// of paging mode `M`.
     ///
     /// All addresses are expressed relative to the gap, so the same checks apply to both
-    /// widths.
+    /// paging modes.
     #[cfg(feature = "step_trait")]
-    fn check_step_around_gap<W: VirtAddrWidth>() {
-        let addr = |addr: u64| unsafe { VirtAddrGeneric::<W>::new_unsafe(addr) };
-        let lower_end = VirtAddrGeneric::<W>::lower_half_end();
-        let upper_start = VirtAddrGeneric::<W>::upper_half_start();
+    fn check_step_around_gap<M: PagingMode>() {
+        let addr = |addr: u64| unsafe { VirtAddrGeneric::<M>::new_unsafe(addr) };
+        let lower_end = VirtAddrGeneric::<M>::lower_half_end();
+        let upper_start = VirtAddrGeneric::<M>::upper_half_start();
         let last = addr(u64::MAX);
         // The number of addresses in each half of the address space.
         #[cfg(target_pointer_width = "64")]
-        let half = 1u64 << (W::BITS - 1);
+        let half = 1u64 << (M::VIRT_ADDR_BITS - 1);
 
         // forward
         assert_eq!(Step::forward(addr(0), 0), addr(0));
@@ -1440,8 +1451,19 @@ mod tests {
     #[test]
     #[cfg(feature = "step_trait")]
     fn virtaddr_step_around_gap() {
-        check_step_around_gap::<Width48>();
-        check_step_around_gap::<Width57>();
+        check_step_around_gap::<FourLevelPaging>();
+        check_step_around_gap::<FiveLevelPaging>();
+    }
+
+    #[test]
+    fn paging_mode_constants() {
+        // Every page table level translates 9 bits, the page offset 12 bits.
+        assert_eq!(FourLevelPaging::LEVELS, 4);
+        assert_eq!(FiveLevelPaging::LEVELS, 5);
+        assert_eq!(FourLevelPaging::VIRT_ADDR_BITS, 12 + 9 * 4);
+        assert_eq!(FiveLevelPaging::VIRT_ADDR_BITS, 12 + 9 * 5);
+        assert_eq!(VirtAddr48::BITS, FourLevelPaging::VIRT_ADDR_BITS);
+        assert_eq!(VirtAddr57::BITS, FiveLevelPaging::VIRT_ADDR_BITS);
     }
 
     #[test]
@@ -1560,12 +1582,12 @@ mod proofs {
     // implementation of VirtAddr.
 
     // This harness proves that our implementation can correctly take 0 or 1
-    // step starting from any address of width `W`.
-    fn forward_base_case_harness<W: VirtAddrWidth>() {
-        let start = kani::any::<VirtAddrGeneric<W>>();
+    // step starting from any address of paging mode `M`.
+    fn forward_base_case_harness<M: PagingMode>() {
+        let start = kani::any::<VirtAddrGeneric<M>>();
         let start_raw = start.as_u64();
-        let lower_end = VirtAddrGeneric::<W>::lower_half_end().as_u64();
-        let upper_start = VirtAddrGeneric::<W>::upper_half_start().as_u64();
+        let lower_end = VirtAddrGeneric::<M>::lower_half_end().as_u64();
+        let upper_start = VirtAddrGeneric::<M>::upper_half_start().as_u64();
 
         // Adding 0 to any address should always yield the same address.
         let same = Step::forward(start, 0);
@@ -1587,7 +1609,7 @@ mod proofs {
         };
         if let Some(expected) = expected {
             // Verify that `expected` is a valid address.
-            assert!(VirtAddrGeneric::<W>::try_new(expected).is_ok());
+            assert!(VirtAddrGeneric::<M>::try_new(expected).is_ok());
         }
         // Verify `forward_checked`.
         let next = Step::forward_checked(start, 1);
@@ -1596,12 +1618,12 @@ mod proofs {
 
     #[kani::proof]
     fn forward_base_case() {
-        forward_base_case_harness::<Width48>();
+        forward_base_case_harness::<FourLevelPaging>();
     }
 
     #[kani::proof]
     fn forward_base_case_57() {
-        forward_base_case_harness::<Width57>();
+        forward_base_case_harness::<FiveLevelPaging>();
     }
 
     // This harness proves that the result of taking two small steps is the

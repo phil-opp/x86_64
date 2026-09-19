@@ -9,7 +9,7 @@ pub use self::mapped_page_table::{OffsetPageTable, PhysOffset};
 pub use self::recursive_page_table::{InvalidPageTable, RecursivePageTable};
 
 use crate::PhysAddr;
-use crate::addr::{VirtAddrGeneric, VirtAddrWidth, Width48};
+use crate::addr::{FourLevelPaging, PagingMode, VirtAddrGeneric};
 use crate::structures::paging::{
     Page, PageSize, PhysFrame, Size1GiB, Size2MiB, Size4KiB,
     frame_alloc::{FrameAllocator, FrameDeallocator},
@@ -23,23 +23,23 @@ mod recursive_page_table;
 
 /// An empty convenience trait that requires the `Mapper` trait for all page sizes.
 ///
-/// The `W` parameter specifies the [width](VirtAddrWidth) of the virtual addresses that the
-/// mapper works with. It defaults to 48-bit addresses (4-level paging).
-pub trait MapperAllSizes<W: VirtAddrWidth = Width48>:
-    Mapper<Size4KiB, W> + Mapper<Size2MiB, W> + Mapper<Size1GiB, W>
+/// The `M` parameter specifies the [paging mode](PagingMode) that the mapper works with.
+/// It defaults to [`FourLevelPaging`].
+pub trait MapperAllSizes<M: PagingMode = FourLevelPaging>:
+    Mapper<Size4KiB, M> + Mapper<Size2MiB, M> + Mapper<Size1GiB, M>
 {
 }
 
-impl<T, W: VirtAddrWidth> MapperAllSizes<W> for T where
-    T: Mapper<Size4KiB, W> + Mapper<Size2MiB, W> + Mapper<Size1GiB, W>
+impl<T, M: PagingMode> MapperAllSizes<M> for T where
+    T: Mapper<Size4KiB, M> + Mapper<Size2MiB, M> + Mapper<Size1GiB, M>
 {
 }
 
 /// Provides methods for translating virtual addresses.
 ///
-/// The `W` parameter specifies the [width](VirtAddrWidth) of the virtual addresses that can
-/// be translated. It defaults to 48-bit addresses (4-level paging).
-pub trait Translate<W: VirtAddrWidth = Width48> {
+/// The `M` parameter specifies the [paging mode](PagingMode) whose virtual addresses can
+/// be translated. It defaults to [`FourLevelPaging`].
+pub trait Translate<M: PagingMode = FourLevelPaging> {
     /// Return the frame that the given virtual address is mapped to and the offset within that
     /// frame.
     ///
@@ -47,7 +47,7 @@ pub trait Translate<W: VirtAddrWidth = Width48> {
     /// frame is returned. Otherwise an error value is returned.
     ///
     /// This function works with huge pages of all sizes.
-    fn translate(&self, addr: VirtAddrGeneric<W>) -> TranslateResult;
+    fn translate(&self, addr: VirtAddrGeneric<M>) -> TranslateResult;
 
     /// Translates the given virtual address to the physical address that it maps to.
     ///
@@ -56,7 +56,7 @@ pub trait Translate<W: VirtAddrWidth = Width48> {
     /// This is a convenience method. For more information about a mapping see the
     /// [`translate`](Translate::translate) method.
     #[inline]
-    fn translate_addr(&self, addr: VirtAddrGeneric<W>) -> Option<PhysAddr> {
+    fn translate_addr(&self, addr: VirtAddrGeneric<M>) -> Option<PhysAddr> {
         match self.translate(addr) {
             TranslateResult::NotMapped | TranslateResult::InvalidFrameAddress(_) => None,
             TranslateResult::Mapped { frame, offset, .. } => Some(frame.start_address() + offset),
@@ -122,10 +122,10 @@ impl MappedFrame {
 
 /// A trait for common page table operations on pages of size `S`.
 ///
-/// The `W` parameter specifies the [width](VirtAddrWidth) of the virtual addresses of the
-/// pages, i.e. whether the mapper manages a 48-bit address space (4-level paging, the
-/// default) or a 57-bit address space (5-level paging).
-pub trait Mapper<S: PageSize, W: VirtAddrWidth = Width48> {
+/// The `M` parameter specifies the [paging mode](PagingMode) of the page tables that the
+/// mapper manages: [`FourLevelPaging`] (the default) for a 48-bit address space or
+/// [`FiveLevelPaging`](crate::addr::FiveLevelPaging) for a 57-bit address space.
+pub trait Mapper<S: PageSize, M: PagingMode = FourLevelPaging> {
     /// Creates a new mapping in the page table.
     ///
     /// This function might need additional physical frames to create new page tables. These
@@ -196,11 +196,11 @@ pub trait Mapper<S: PageSize, W: VirtAddrWidth = Width48> {
     #[inline]
     unsafe fn map_to<A>(
         &mut self,
-        page: Page<S, W>,
+        page: Page<S, M>,
         frame: PhysFrame<S>,
         flags: PageTableFlags,
         frame_allocator: &mut A,
-    ) -> Result<MapperFlush<S, W>, MapToError<S>>
+    ) -> Result<MapperFlush<S, M>, MapToError<S>>
     where
         Self: Sized,
         A: FrameAllocator<Size4KiB> + ?Sized,
@@ -287,12 +287,12 @@ pub trait Mapper<S: PageSize, W: VirtAddrWidth = Width48> {
     /// ```
     unsafe fn map_to_with_table_flags<A>(
         &mut self,
-        page: Page<S, W>,
+        page: Page<S, M>,
         frame: PhysFrame<S>,
         flags: PageTableFlags,
         parent_table_flags: PageTableFlags,
         frame_allocator: &mut A,
-    ) -> Result<MapperFlush<S, W>, MapToError<S>>
+    ) -> Result<MapperFlush<S, M>, MapToError<S>>
     where
         Self: Sized,
         A: FrameAllocator<Size4KiB> + ?Sized;
@@ -303,8 +303,8 @@ pub trait Mapper<S: PageSize, W: VirtAddrWidth = Width48> {
     #[allow(clippy::type_complexity)]
     fn unmap(
         &mut self,
-        page: Page<S, W>,
-    ) -> Result<(PhysFrame<S>, PageTableFlags, MapperFlush<S, W>), UnmapError>;
+        page: Page<S, M>,
+    ) -> Result<(PhysFrame<S>, PageTableFlags, MapperFlush<S, M>), UnmapError>;
 
     /// Clears a mapping from the page table and returns the frame that used to be mapped.
     ///
@@ -312,7 +312,7 @@ pub trait Mapper<S: PageSize, W: VirtAddrWidth = Width48> {
     /// clear the table entry for any valid page.
     ///
     /// Note that no page tables or pages are deallocated.
-    fn clear(&mut self, page: Page<S, W>) -> Result<UnmappedFrame<S, W>, UnmapError>;
+    fn clear(&mut self, page: Page<S, M>) -> Result<UnmappedFrame<S, M>, UnmapError>;
 
     /// Updates the flags of an existing mapping.
     ///
@@ -327,9 +327,9 @@ pub trait Mapper<S: PageSize, W: VirtAddrWidth = Width48> {
     /// spaces.
     unsafe fn update_flags(
         &mut self,
-        page: Page<S, W>,
+        page: Page<S, M>,
         flags: PageTableFlags,
-    ) -> Result<MapperFlush<S, W>, FlagUpdateError>;
+    ) -> Result<MapperFlush<S, M>, FlagUpdateError>;
 
     /// Set the flags of an existing page level 4 table entry
     ///
@@ -342,7 +342,7 @@ pub trait Mapper<S: PageSize, W: VirtAddrWidth = Width48> {
     /// spaces.
     unsafe fn set_flags_p4_entry(
         &mut self,
-        page: Page<S, W>,
+        page: Page<S, M>,
         flags: PageTableFlags,
     ) -> Result<MapperFlushAll, FlagUpdateError>;
 
@@ -357,7 +357,7 @@ pub trait Mapper<S: PageSize, W: VirtAddrWidth = Width48> {
     /// spaces.
     unsafe fn set_flags_p3_entry(
         &mut self,
-        page: Page<S, W>,
+        page: Page<S, M>,
         flags: PageTableFlags,
     ) -> Result<MapperFlushAll, FlagUpdateError>;
 
@@ -372,7 +372,7 @@ pub trait Mapper<S: PageSize, W: VirtAddrWidth = Width48> {
     /// spaces.
     unsafe fn set_flags_p2_entry(
         &mut self,
-        page: Page<S, W>,
+        page: Page<S, M>,
         flags: PageTableFlags,
     ) -> Result<MapperFlushAll, FlagUpdateError>;
 
@@ -380,7 +380,7 @@ pub trait Mapper<S: PageSize, W: VirtAddrWidth = Width48> {
     ///
     /// This function assumes that the page is mapped to a frame of size `S` and returns an
     /// error otherwise.
-    fn translate_page(&self, page: Page<S, W>) -> Result<PhysFrame<S>, TranslateError>;
+    fn translate_page(&self, page: Page<S, M>) -> Result<PhysFrame<S>, TranslateError>;
 
     /// Maps the given frame to the virtual page with the same address.
     ///
@@ -394,12 +394,12 @@ pub trait Mapper<S: PageSize, W: VirtAddrWidth = Width48> {
         frame: PhysFrame<S>,
         flags: PageTableFlags,
         frame_allocator: &mut A,
-    ) -> Result<MapperFlush<S, W>, MapToError<S>>
+    ) -> Result<MapperFlush<S, M>, MapToError<S>>
     where
         Self: Sized,
         A: FrameAllocator<Size4KiB> + ?Sized,
         S: PageSize,
-        Self: Mapper<S, W>,
+        Self: Mapper<S, M>,
     {
         let page = Page::containing_address(VirtAddrGeneric::new(frame.start_address().as_u64()));
         unsafe { self.map_to(page, frame, flags, frame_allocator) }
@@ -410,7 +410,7 @@ pub trait Mapper<S: PageSize, W: VirtAddrWidth = Width48> {
 /// the unmapped frame or the entry data if the frame is not marked as present.
 #[derive(Debug)]
 #[must_use = "Page table changes must be flushed or ignored if the page is present."]
-pub enum UnmappedFrame<S: PageSize, W: VirtAddrWidth = Width48> {
+pub enum UnmappedFrame<S: PageSize, M: PagingMode = FourLevelPaging> {
     /// The frame was present before the [`Mapper::clear`] call
     Present {
         /// The physical frame that was unmapped
@@ -418,7 +418,7 @@ pub enum UnmappedFrame<S: PageSize, W: VirtAddrWidth = Width48> {
         /// The flags of the frame that was unmapped
         flags: PageTableFlags,
         /// The changed page, to flush the TLB
-        flush: MapperFlush<S, W>,
+        flush: MapperFlush<S, M>,
     },
     /// The frame was not present before the [`Mapper::clear`] call
     NotPresent {
@@ -438,15 +438,15 @@ pub enum UnmappedFrame<S: PageSize, W: VirtAddrWidth = Width48> {
     not(all(feature = "instructions", target_arch = "x86_64")),
     allow(dead_code)
 )] // FIXME
-pub struct MapperFlush<S: PageSize, W: VirtAddrWidth = Width48>(Page<S, W>);
+pub struct MapperFlush<S: PageSize, M: PagingMode = FourLevelPaging>(Page<S, M>);
 
-impl<S: PageSize, W: VirtAddrWidth> MapperFlush<S, W> {
+impl<S: PageSize, M: PagingMode> MapperFlush<S, M> {
     /// Create a new flush promise
     ///
     /// Note that this method is intended for implementing the [`Mapper`] trait and no other uses
     /// are expected.
     #[inline]
-    pub fn new(page: Page<S, W>) -> Self {
+    pub fn new(page: Page<S, M>) -> Self {
         MapperFlush(page)
     }
 
@@ -463,7 +463,7 @@ impl<S: PageSize, W: VirtAddrWidth> MapperFlush<S, W> {
 
     /// Returns the page to be flushed.
     #[inline]
-    pub fn page(&self) -> Page<S, W> {
+    pub fn page(&self) -> Page<S, M> {
         self.0
     }
 }
@@ -550,9 +550,9 @@ static _ASSERT_OBJECT_SAFE: Option<&(dyn Translate + Sync)> = None;
 
 /// Provides methods for cleaning up unused entries.
 ///
-/// The `W` parameter specifies the [width](VirtAddrWidth) of the virtual addresses that the
-/// page table manages. It defaults to 48-bit addresses (4-level paging).
-pub trait CleanUp<W: VirtAddrWidth = Width48> {
+/// The `M` parameter specifies the [paging mode](PagingMode) of the page tables. It
+/// defaults to [`FourLevelPaging`].
+pub trait CleanUp<M: PagingMode = FourLevelPaging> {
     /// Remove all empty P1-P3 tables
     ///
     /// ## Safety
@@ -587,7 +587,7 @@ pub trait CleanUp<W: VirtAddrWidth = Width48> {
     /// (e.g. no reference counted page tables or reusing the same page tables for different virtual addresses ranges in the same page table).
     unsafe fn clean_up_addr_range<D>(
         &mut self,
-        range: PageRangeInclusive<Size4KiB, W>,
+        range: PageRangeInclusive<Size4KiB, M>,
         frame_deallocator: &mut D,
     ) where
         D: FrameDeallocator<Size4KiB>;

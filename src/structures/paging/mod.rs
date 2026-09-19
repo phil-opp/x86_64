@@ -2,18 +2,18 @@
 //!
 //! Page tables translate virtual memory “pages” to physical memory “frames”.
 //!
-//! ## Virtual address width
+//! ## Paging modes
 //!
 //! The [`Page`] type, the page range types, and the [`Mapper`], [`Translate`], and
-//! [`mapper::CleanUp`] traits are generic over the [width](crate::addr::VirtAddrWidth) of
-//! the virtual addresses they work with. The width defaults to 48 bits
-//! ([`Width48`](crate::addr::Width48), 4-level paging), so `Page<Size4KiB>` is a page in a
-//! 48-bit address space. Use [`Width57`](crate::addr::Width57) for pages in a 57-bit address
-//! space (5-level paging), e.g. `Page<Size4KiB, Width57>`.
+//! [`mapper::CleanUp`] traits are generic over the [paging mode](crate::addr::PagingMode)
+//! they work with. The paging mode defaults to
+//! [`FourLevelPaging`](crate::addr::FourLevelPaging), so `Page<Size4KiB>` is a page in a
+//! 48-bit address space. Use [`FiveLevelPaging`](crate::addr::FiveLevelPaging) for pages
+//! in a 57-bit address space, e.g. `Page<Size4KiB, FiveLevelPaging>`.
 //!
 //! The mapper implementations in this module ([`MappedPageTable`], `OffsetPageTable`,
 //! and `RecursivePageTable`) currently only support 4-level paging, i.e. they only
-//! implement the traits for 48-bit addresses.
+//! implement the traits for `FourLevelPaging`.
 
 pub use self::frame::PhysFrame;
 pub use self::frame_alloc::{FrameAllocator, FrameDeallocator};
